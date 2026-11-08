@@ -1,0 +1,14 @@
+[project]
+name = "formbot"
+version = "0.1.0"
+description = "Walks a user through filling out a PDF or Word form, field by field."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+formbot = "formbot.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

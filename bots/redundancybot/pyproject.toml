@@ -1,0 +1,14 @@
+[project]
+name = "redundancybot"
+version = "0.1.0"
+description = "Clusters likely duplicate files and explains them so a human can decide what to delete."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+redundancybot = "redundancybot.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
