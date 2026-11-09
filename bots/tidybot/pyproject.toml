@@ -1,0 +1,14 @@
+[project]
+name = "tidybot"
+version = "0.1.0"
+description = "Runs DupeBot, ExpiryBot and CatalogBot together for corpus-wide clean-up jobs."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+tidybot = "tidybot.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

@@ -1,0 +1,14 @@
+[project]
+name = "catalogbot"
+version = "0.1.0"
+description = "Writes a README in each folder describing what that folder and its subfolders contain."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+catalogbot = "catalogbot.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

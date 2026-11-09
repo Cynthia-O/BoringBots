@@ -14,6 +14,8 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Lets import sorting recognise each bot's own package as first-party.
+src = ["bots/*/src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]

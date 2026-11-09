@@ -1,13 +1,13 @@
 [project]
-name = "redundancybot"
+name = "expirybot"
 version = "0.1.0"
-description = "Clusters likely duplicate files and explains them so a human can decide what to delete."
+description = "Helps you agree on a retention policy, then flags documents past their retention period."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
-redundancybot = "redundancybot.cli:main"
+expirybot = "expirybot.cli:main"
 
 [build-system]
 requires = ["hatchling"]
