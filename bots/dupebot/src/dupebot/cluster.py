@@ -3,8 +3,8 @@
 Pipeline:
 1. Scan: list regular files under root (symlinks are skipped), with size and
    modified time. Read-only.
-2. Filter: skip excluded names (see ``cleaning``), files under MIN_SIZE_BYTES,
-   and names that are empty after cleaning.
+2. Filter: skip excluded names (see ``cleaning``), files under the minimum size
+   for their type (see ``min_size_for``), and names that are empty after cleaning.
 3. Group by extension, dropping extensions with only one remaining file.
 4. Bucket by prefix of the cleaned name: first PREFIX_START characters, then one
    more character at a time for any bucket over MAX_BUCKET_SIZE files.
@@ -25,10 +25,20 @@ from pathlib import Path
 
 from dupebot.cleaning import CleanedName, clean_name, exclusion_reason
 
-MIN_SIZE_BYTES = 250 * 1024
+# Files below these sizes are not clustered. Images get a higher floor: photos and
+# scans are large, and small images are mostly icons and thumbnails. Documents
+# such as bills and receipts are often well under 100 KB.
+MIN_SIZE_IMAGE_BYTES = 250 * 1024
+MIN_SIZE_OTHER_BYTES = 20 * 1024
+IMAGE_EXTENSIONS = frozenset(
+    {
+        ".jpg", ".jpeg", ".png", ".gif", ".heic", ".heif", ".tif", ".tiff", ".bmp",
+        ".webp", ".raw", ".dng", ".cr2", ".cr3", ".nef", ".arw",
+    }
+)  # fmt: skip
 DEFAULT_THRESHOLD = 0.6
 PREFIX_START = 5
-MAX_BUCKET_SIZE = 1000
+MAX_BUCKET_SIZE = 500
 # Below this many pairwise comparisons in total, starting worker processes costs
 # more time than it saves, so clustering runs in this process.
 PARALLEL_MIN_COMPARISONS = 200_000
@@ -54,8 +64,18 @@ class Cluster:
     files: tuple[FileRecord, ...]  # oldest modified first
 
 
-def scan(root: Path, min_size: int = MIN_SIZE_BYTES) -> ScanResult:
-    """Find candidate files under root, recording why the others were skipped."""
+def min_size_for(path: Path) -> int:
+    """Minimum size in bytes for a file to be clustered, based on its type."""
+    if path.suffix.lower() in IMAGE_EXTENSIONS:
+        return MIN_SIZE_IMAGE_BYTES
+    return MIN_SIZE_OTHER_BYTES
+
+
+def scan(root: Path, min_size: int | None = None) -> ScanResult:
+    """Find candidate files under root, recording why the others were skipped.
+
+    min_size overrides the per-type minimum from min_size_for for every file.
+    """
     result = ScanResult()
     for dirpath, _dirnames, filenames in os.walk(root):  # does not follow symlinks
         for filename in filenames:
@@ -69,7 +89,8 @@ def scan(root: Path, min_size: int = MIN_SIZE_BYTES) -> ScanResult:
                 continue  # symlinks, sockets and the like
             name = clean_name(filename)
             reason = exclusion_reason(name)
-            if reason is None and info.st_size < min_size:
+            limit = min_size if min_size is not None else min_size_for(path)
+            if reason is None and info.st_size < limit:
                 reason = "too_small"
             if reason is None and not name.cleaned:
                 reason = "empty_after_cleaning"

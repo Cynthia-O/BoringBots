@@ -48,6 +48,14 @@ def test_scan_finds_nested_files_and_records_skips(tmp_path):
     }
 
 
+def test_scan_default_minimum_depends_on_file_type(tmp_path):
+    for name in ("water bill.pdf", "photo.jpg"):
+        (tmp_path / name).write_bytes(b"x" * 100_000)  # between the two minimums
+    result = scan(tmp_path)
+    assert [r.path.name for r in result.records] == ["water bill.pdf"]
+    assert [p.name for p in result.skipped["too_small"]] == ["photo.jpg"]
+
+
 def test_bucket_by_prefix_lengthens_prefix_until_buckets_fit():
     records = [record(f"report{c}{i}.txt") for c in "ab" for i in range(3)]
     records.append(record("other.txt"))

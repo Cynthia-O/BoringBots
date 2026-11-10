@@ -28,6 +28,10 @@ EXCLUDED_NAME_PATTERNS = tuple(
         r"^img[_-]?\d+",  # camera and phone photos: IMG_1234.jpg
         r"^dsc[f_]?\d+",  # DSC_1234.jpg, DSCF1234.jpg, DSC01234.jpg
         r"^pxl_\d+",  # Google Pixel photos: PXL_20230115_123456.jpg
+        # Samsung and other Android cameras name photos by date and time only:
+        # 20261012_142703.jpg, plus burst suffixes like _01 or (1). A name with
+        # any other words in it is the user's own and stays in.
+        r"^\d{8}_\d{6}(?:_\d+|\(\d+\))?\.[^.]+$",
         r"^screen ?shot",  # Screenshot 2023-01-15 at 10.15.32.png, Screen Shot ...
         r"^scan[\s_-]*\d+(?:\.[^.]+)?$",  # scanner output: Scan 12.pdf, scan_0001.pdf
     )

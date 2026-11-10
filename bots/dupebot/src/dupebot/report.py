@@ -5,11 +5,14 @@ from pathlib import Path
 
 from dupebot.cluster import (
     MAX_BUCKET_SIZE,
+    MIN_SIZE_IMAGE_BYTES,
+    MIN_SIZE_OTHER_BYTES,
     PREFIX_START,
     Cluster,
     FileRecord,
     ScanResult,
 )
+from dupebot.metadata import read_authors
 
 
 def build_report(
@@ -17,7 +20,6 @@ def build_report(
     scan_result: ScanResult,
     clusters: list[Cluster],
     threshold: float,
-    min_size: int,
 ) -> dict:
     per_extension: dict[str, int] = {}
     cluster_entries = []
@@ -34,7 +36,7 @@ def build_report(
         "root": str(root),
         "settings": {
             "similarity_threshold": threshold,
-            "min_size_bytes": min_size,
+            "min_size_bytes": {"images": MIN_SIZE_IMAGE_BYTES, "other": MIN_SIZE_OTHER_BYTES},
             "prefix_start": PREFIX_START,
             "max_bucket_size": MAX_BUCKET_SIZE,
         },
@@ -54,13 +56,18 @@ def build_report(
 
 
 def _file_entry(record: FileRecord) -> dict:
+    # Authors are read here, for clustered files only, because it means opening
+    # the file; doing it during the scan would open every file in the folder.
     name = record.name
+    authors = read_authors(record.path)
     return {
         "path": str(record.path),
         "name": name.original,
         "cleaned_name": name.cleaned,
         "size_bytes": record.size_bytes,
         "modified": datetime.fromtimestamp(record.modified).isoformat(timespec="seconds"),
+        "created_by": authors.created_by,
+        "modified_by": authors.modified_by,
         "dates": list(name.dates),
         "version_markers": list(name.version_markers),
         "set_markers": list(name.set_markers),

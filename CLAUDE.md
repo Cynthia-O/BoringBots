@@ -14,6 +14,7 @@ This is a uv workspace on Python 3.11+. The root `pyproject.toml` has no code of
 ./install.sh                               # first-time setup: installs uv if missing, then syncs
 uv sync --all-packages                     # install all bots plus dev tools
 uv run --package dupebot dupebot <dir>
+uv run --package dupebot dupebot <dir> --analyze   # calls the API; key in .env (copy .env.example)
 uv run --package formbot formbot <form.pdf|form.docx>
 uv run --package expirybot expirybot <dir>   # likewise catalogbot, tidybot (stubs for now)
 uv run pytest                              # all tests

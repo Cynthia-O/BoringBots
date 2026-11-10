@@ -6,7 +6,11 @@ dist/
 build/
 .pytest_cache/
 .ruff_cache/
+# Secrets: .env and variants such as .env.local stay local. Only the template
+# with no values in it, .env.example, is committed.
 .env
+.env.*
+!.env.example
 
 # macOS
 .DS_Store

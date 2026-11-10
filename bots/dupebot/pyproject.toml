@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Clusters likely duplicate files and explains them so a human can decide what to delete."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "anthropic>=2.7,<3",
+]
 
 [project.scripts]
 dupebot = "dupebot.cli:main"

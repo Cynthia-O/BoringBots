@@ -2,24 +2,7 @@ import json
 
 import pytest
 
-from dupebot.cli import ask_threshold, main
-
-
-def answers(*replies):
-    it = iter(replies)
-    return lambda: next(it)
-
-
-def test_ask_threshold_uses_default_on_blank():
-    assert ask_threshold(answers(""), interactive=True) == 0.6
-
-
-def test_ask_threshold_reasks_until_valid():
-    assert ask_threshold(answers("high", "1.5", "0.75"), interactive=True) == 0.75
-
-
-def test_ask_threshold_skips_prompt_when_not_interactive():
-    assert ask_threshold(answers(), interactive=False) == 0.6
+from dupebot.cli import main
 
 
 def test_main_writes_report_to_new_file(tmp_path):

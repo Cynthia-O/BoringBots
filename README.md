@@ -23,6 +23,21 @@ This installs [uv](https://docs.astral.sh/uv/) if you don't have it, which in tu
 uv run dupebot ~/Documents
 ```
 
+## Connect to Claude
+Some bot features call Claude through the Anthropic API, which needs your own API key. Usage is billed to your account.
+
+1. Create a key in the [Claude Console](https://platform.claude.com/).
+2. In this folder, run `cp .env.example .env`.
+3. Open `.env` in a text editor and paste your key after `ANTHROPIC_API_KEY=`.
+
+`.env` is git-ignored: it stays on your computer and is never committed, so your key is never shared. Run the bots from this folder so they can find it. To try it out:
+
+```sh
+uv run dupebot ~/Documents --analyze
+```
+
+DupeBot tells you what it is about to send and asks before sending anything.
+
 ## [DupeBot](bots/dupebot/)
 DupeBot helps you clear out clutter by finding files on your Mac and in Google Drive that are likely duplicates, older versions or convenience copies of one another. It groups candidate files by name and file type, then explains what it found so you can decide what to delete. It never deletes anything itself, so that decision always stays with you.
 

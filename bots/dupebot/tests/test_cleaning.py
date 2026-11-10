@@ -80,6 +80,9 @@ def test_name_with_only_markers_cleans_to_empty():
         "IMG_1234.jpg",
         "DSC01234.jpg",
         "PXL_20230115_123456.jpg",
+        "20261012_142703.jpg",
+        "20261012_142703_01.jpg",
+        "20261012_142703(1).jpg",
         "Screenshot 2023-01-15 at 10.15.32.png",
         "Scan 12.pdf",
         "index.html",
@@ -93,6 +96,14 @@ def test_excluded_names(filename):
     assert exclusion_reason(clean_name(filename)) == "excluded"
 
 
-@pytest.mark.parametrize("filename", ["Budget Review.xlsx", "index of suppliers.xlsx"])
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "Budget Review.xlsx",
+        "index of suppliers.xlsx",
+        "20250815_transfer_to_savings.pdf",  # dated, but named by a person
+        "20261012_142703_receipt.jpg",
+    ],
+)
 def test_ordinary_names_are_not_excluded(filename):
     assert exclusion_reason(clean_name(filename)) is None
