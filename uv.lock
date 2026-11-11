@@ -8,6 +8,7 @@ resolution-markers = [
 
 [manifest]
 members = [
+    "botview",
     "catalogbot",
     "dupebot",
     "expirybot",
@@ -63,6 +64,11 @@ wheels = [
 ]
 
 [[package]]
+name = "botview"
+version = "0.1.0"
+source = { editable = "packages/botview" }
+
+[[package]]
 name = "catalogbot"
 version = "0.1.0"
 source = { editable = "bots/catalogbot" }
@@ -91,10 +97,14 @@ version = "0.1.0"
 source = { editable = "bots/dupebot" }
 dependencies = [
     { name = "anthropic" },
+    { name = "botview" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "anthropic", specifier = ">=2.7,<3" }]
+requires-dist = [
+    { name = "anthropic", specifier = ">=2.7,<3" },
+    { name = "botview", editable = "packages/botview" },
+]
 
 [[package]]
 name = "expirybot"

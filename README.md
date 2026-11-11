@@ -36,7 +36,15 @@ Some bot features call Claude through the Anthropic API, which needs your own AP
 uv run dupebot ~/Documents --analyze
 ```
 
-DupeBot tells you what it is about to send and asks before sending anything.
+DupeBot tells you what it is about to send and asks before sending anything. The results open as a page in your browser. The page is a file on your computer and loads nothing from the internet.
+
+To run test rounds from the browser instead, with settings controls (including the folder to scan) and a running tally of tokens and estimated cost:
+
+```sh
+uv run dupebot --ui
+```
+
+Press Ctrl+C in Terminal to stop it.
 
 ## [DupeBot](bots/dupebot/)
 DupeBot helps you clear out clutter by finding files on your Mac and in Google Drive that are likely duplicates, older versions or convenience copies of one another. It groups candidate files by name and file type, then explains what it found so you can decide what to delete. It never deletes anything itself, so that decision always stays with you.

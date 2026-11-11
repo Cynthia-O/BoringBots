@@ -1,0 +1,11 @@
+[project]
+name = "botview"
+version = "0.1.0"
+description = "Shared browser pages for BoringBots: bots describe a page, botview renders it as a self-contained local HTML file and opens it."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

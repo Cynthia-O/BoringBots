@@ -2,8 +2,7 @@
 # one lockfile (uv.lock) and holds the dev tooling every bot shares.
 
 [tool.uv.workspace]
-members = ["bots/*"]
-# Add "packages/*" here once shared code (e.g. packages/botcommon) exists.
+members = ["bots/*", "packages/*"]  # bots, and code they share (packages/botview)
 
 [dependency-groups]
 dev = [
@@ -15,7 +14,7 @@ dev = [
 line-length = 100
 target-version = "py311"
 # Lets import sorting recognise each bot's own package as first-party.
-src = ["bots/*/src"]
+src = ["bots/*/src", "packages/*/src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]

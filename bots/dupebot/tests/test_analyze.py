@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,10 +8,12 @@ import pytest
 from dupebot.analyze import (
     OMITTED_FILE_FIELDS,
     OMITTED_FROM_INPUT,
+    OUTPUT_SCHEMA,
     AnalysisError,
     analysis_input,
     analyze,
     batch_clusters,
+    check_answer,
     system_prompt,
 )
 from dupebot.cleaning import clean_name
@@ -102,18 +105,45 @@ class FakeStream:
         return self.message
 
 
+def answer_for(payload: str) -> str:
+    """A schema-shaped answer that puts each cluster's files in one unrelated group."""
+    clusters = json.loads(payload)["clusters"]
+    return json.dumps(
+        {
+            "clusters": [
+                {
+                    "cluster_id": c["cluster_id"],
+                    "groups": [
+                        {
+                            "files": [{"path": f["path"], "role": "member"} for f in c["files"]],
+                            "reason": "names differ",
+                            "relationship": "unrelated",
+                            "confidence": "high",
+                            "check_before_deleting": "",
+                        }
+                    ],
+                }
+                for c in clusters
+            ]
+        }
+    )
+
+
 class FakeClient:
-    def __init__(self, stop_reason: str = "end_turn"):
+    def __init__(self, stop_reason: str = "end_turn", text: str | None = None):
         self.requests: list[dict] = []
         self.stop_reason = stop_reason
+        self.text = text  # None: a valid answer for whatever was sent
+        self.last_text = ""
         self.messages = SimpleNamespace(stream=self._stream)
 
     def _stream(self, **request):
         self.requests.append(request)
+        self.last_text = self.text or answer_for(request["messages"][0]["content"])
         return FakeStream(
             SimpleNamespace(
                 stop_reason=self.stop_reason,
-                content=[SimpleNamespace(type="text", text="analysis")],
+                content=[SimpleNamespace(type="text", text=self.last_text)],
                 usage=SimpleNamespace(input_tokens=100, output_tokens=20),
             )
         )
@@ -127,7 +157,44 @@ def test_analyze_sends_prompt_and_trimmed_input():
     assert request["system"] == system_prompt()
     sent = request["messages"][0]["content"]
     assert "cleaned_name" not in sent and "settings" not in sent
-    assert result.text == "analysis" and result.input_tokens == 100
+    assert result.input_tokens == 100
+    [cluster] = result.clusters
+    assert cluster["groups"][0]["files"] == [{"path": "FINAL_a_2023.pdf", "role": "member"}]
+    assert result.warnings == []
+
+
+def test_output_format_is_enforced_through_the_api():
+    client = FakeClient()
+    analyze(full_report(), client=client)
+    fmt = client.requests[0]["output_config"]["format"]
+    assert fmt == {"type": "json_schema", "schema": OUTPUT_SCHEMA}
+
+
+def test_unparseable_answer_is_an_error():
+    with pytest.raises(AnalysisError):
+        analyze(full_report(), client=FakeClient(text="not json"))
+
+
+def test_check_answer_finds_missing_extra_and_duplicate_files():
+    batch = [
+        {"cluster_id": "pdf-0001", "files": [{"path": "a"}, {"path": "b"}]},
+        {"cluster_id": "pdf-0002", "files": [{"path": "c"}]},
+    ]
+
+    def group(*paths):
+        return {"files": [{"path": p, "role": "member"} for p in paths]}
+
+    answer = [
+        {"cluster_id": "pdf-0001", "groups": [group("a", "x"), group("a")]},
+        {"cluster_id": "pdf-0009", "groups": []},
+    ]
+    assert check_answer(batch, answer) == [
+        "pdf-0001: b was left out",
+        "pdf-0001: x is not in this cluster",
+        "pdf-0001: a is in more than one group",
+        "pdf-0009: not a cluster in the input",
+        "pdf-0002: not analysed",
+    ]
 
 
 @pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens"])
@@ -168,12 +235,13 @@ class FailingClient:
 def test_successful_calls_are_logged(tmp_path):
     from dupebot.calllog import CallLog
 
+    client = FakeClient()
     with CallLog(tmp_path / "log.sqlite") as log:
-        analyze(full_report(), model="claude-haiku-5-5", client=FakeClient(), log=log)
+        analyze(full_report(), model="claude-haiku-5-5", client=client, log=log)
         [row] = log.rows()
     assert row["model"] == "claude-haiku-5-5" and row["purpose"] == "analyze"
     assert row["input_chars"] > len(system_prompt())
-    assert row["output_chars"] == len("analysis")
+    assert row["output_chars"] == len(client.last_text)
     assert (row["input_tokens"], row["output_tokens"]) == (100, 20)
     assert row["stop_reason"] == "end_turn" and row["error"] is None
 
@@ -209,7 +277,7 @@ def test_effort_is_sent_and_logged_when_set(tmp_path):
     with CallLog(tmp_path / "log.sqlite") as log:
         analyze(full_report(), client=client, log=log, effort="low")
         [row] = log.rows()
-    assert client.requests[0]["output_config"] == {"effort": "low"}
+    assert client.requests[0]["output_config"]["effort"] == "low"
     assert row["effort"] == "low"
 
 
@@ -220,7 +288,7 @@ def test_model_default_effort_is_left_alone(tmp_path):
     with CallLog(tmp_path / "log.sqlite") as log:
         analyze(full_report(), client=client, log=log)
         [row] = log.rows()
-    assert "output_config" not in client.requests[0]
+    assert "effort" not in client.requests[0]["output_config"]
     assert row["effort"] is None
 
 
@@ -229,3 +297,36 @@ def test_unknown_effort_is_rejected_before_any_call():
     with pytest.raises(ValueError):
         analyze(full_report(), client=client, effort="extreme")
     assert client.requests == []
+
+
+# --- results page ---
+
+
+def test_run_analysis_writes_a_results_page(monkeypatch, capsys, tmp_path):
+    report = full_report()
+
+    def fake_analyze(report, model, log, effort):
+        return analyze(report, model=model, client=FakeClient(), log=log, effort=effort)
+
+    opened = []
+    monkeypatch.setattr("dupebot.cli.analyze", fake_analyze)
+    monkeypatch.setattr("dupebot.cli.open_in_browser", lambda path: opened.append(path) or True)
+    assert run_analysis(report, "claude-haiku-5-5", confirmed=True) == 0
+    [page] = opened
+    assert page.parent == tmp_path / "pages"  # next to the (test) call log
+    html = page.read_text()
+    assert "pdf-0001" in html and "FINAL_a_2023.pdf" in html and "Unrelated" in html
+    assert "pdf-0001: unrelated (1 files, high)" in capsys.readouterr().out
+
+
+def test_no_browser_still_writes_the_page(monkeypatch, tmp_path):
+    def fake_analyze(report, model, log, effort):
+        return analyze(report, model=model, client=FakeClient(), log=log, effort=effort)
+
+    def fail(path):
+        raise AssertionError("must not open a browser")
+
+    monkeypatch.setattr("dupebot.cli.analyze", fake_analyze)
+    monkeypatch.setattr("dupebot.cli.open_in_browser", fail)
+    assert run_analysis(full_report(), "m", confirmed=True, open_browser=False) == 0
+    assert len(list((tmp_path / "pages").glob("*.html"))) == 1

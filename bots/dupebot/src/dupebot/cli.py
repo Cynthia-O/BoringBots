@@ -10,20 +10,21 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-import anthropic
-
+from botview import LiveServer, open_in_browser, write_page
+from dupebot import apierrors
 from dupebot.analyze import (
     DEFAULT_MODEL,
     EFFORT_LEVELS,
-    AnalysisError,
     analyze,
     batch_clusters,
 )
-from dupebot.calllog import CallLog
+from dupebot.calllog import CallLog, default_db_path
 from dupebot.cluster import DEFAULT_THRESHOLD, cluster_records, scan
 from dupebot.env import load_dotenv
 from dupebot.report import build_report
 from dupebot.settings import MODEL_DEFAULT_EFFORT, ask_settings, describe_effort, parse_threshold
+from dupebot.ui import DupeBotApp
+from dupebot.view import analysis_page, estimated_cost, summary_lines
 
 
 def _threshold_arg(text: str) -> float:
@@ -38,7 +39,12 @@ def main(argv: list[str] | None = None) -> int:
         prog="dupebot",
         description="Find likely duplicate files. Reports only; never deletes.",
     )
-    parser.add_argument("root", type=Path, help="Directory to scan")
+    parser.add_argument(
+        "root",
+        type=Path,
+        nargs="?",
+        help="Directory to scan. Optional with --ui, where the folder can be typed in the page.",
+    )
     parser.add_argument(
         "--threshold",
         type=_threshold_arg,
@@ -53,8 +59,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--analyze",
         action="store_true",
-        help="Send the clusters to the analyst model and print its analysis instead of "
-        "the JSON report. Needs ANTHROPIC_API_KEY (see .env.example). Asks first.",
+        help="Send the clusters to the analyst model and show its analysis in your "
+        "browser instead of printing the JSON report. Needs ANTHROPIC_API_KEY (see "
+        ".env.example). Asks first.",
     )
     parser.add_argument(
         "--model",
@@ -67,6 +74,18 @@ def main(argv: list[str] | None = None) -> int:
         f"output tokens. '{MODEL_DEFAULT_EFFORT}' (the default) leaves the model's own.",
     )
     parser.add_argument(
+        "--ui",
+        action="store_true",
+        help="Run DupeBot from a page in your browser: choose settings, scan and send "
+        "from there, with a running token tally. Stop it with Ctrl+C.",
+    )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="With --analyze, save the results page but do not open it. With --ui, "
+        "print the page's address but do not open it.",
+    )
+    parser.add_argument(
         "--yes",
         action="store_true",
         help="With --analyze, send without asking for confirmation.",
@@ -77,10 +96,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if not args.root.is_dir():
+    if args.root is None and not args.ui:
+        parser.error("give the directory to scan (or use --ui to choose it in the browser)")
+    if args.root is not None and not args.root.is_dir():
         parser.error(f"not a directory: {args.root}")
     if args.output and args.output.exists():
         parser.error(f"will not write over an existing file: {args.output}")
+    if args.ui:
+        if args.output or args.analyze or args.yes:
+            parser.error("--ui cannot be combined with --output, --analyze or --yes")
+        load_dotenv()
+        root = args.root.resolve() if args.root else None  # the page needs a full path
+        app = DupeBotApp(root, args.threshold, args.model, args.effort)
+        LiveServer(app).serve(open_browser=not args.no_browser)
+        return 0
 
     settings = ask_settings(args.threshold, args.model, args.effort, analyzing=args.analyze)
     scan_result = scan(args.root)
@@ -104,7 +133,13 @@ def main(argv: list[str] | None = None) -> int:
         file=sys.stderr,
     )
     if args.analyze:
-        return run_analysis(report, settings.model, confirmed=args.yes, effort=settings.effort)
+        return run_analysis(
+            report,
+            settings.model,
+            confirmed=args.yes,
+            effort=settings.effort,
+            open_browser=not args.no_browser,
+        )
     # TODO: stage 3 (agent explains findings).
     return 0
 
@@ -116,8 +151,10 @@ def run_analysis(
     ask: Callable[[], str] = input,
     interactive: bool | None = None,
     effort: str | None = None,
+    open_browser: bool = True,
 ) -> int:
-    """Send the clusters to the model and print its analysis. Returns an exit code."""
+    """Send the clusters to the model, save the analysis as a page and open it.
+    Returns an exit code."""
     clusters = report["clusters"]
     if not clusters:
         print("No clusters to analyse.", file=sys.stderr)
@@ -151,41 +188,34 @@ def run_analysis(
     log = CallLog()
     try:
         results = analyze(report, model=model, log=log, effort=effort)
-    except anthropic.CredentialsError:
-        print(_NO_KEY, file=sys.stderr)
-        return 1
-    except anthropic.AuthenticationError:
-        print(f"The API key was rejected. {_NO_KEY}", file=sys.stderr)
-        return 1
-    except anthropic.NotFoundError:
-        print(f"Model not found: {model}", file=sys.stderr)
-        return 1
-    except anthropic.RateLimitError:
-        print("Rate limited by the API. Wait a minute and try again.", file=sys.stderr)
-        return 1
-    except anthropic.APIStatusError as e:
-        print(f"The API returned an error ({e.status_code}): {e.message}", file=sys.stderr)
-        return 1
-    except anthropic.APIConnectionError:
-        print("Could not reach the API. Check your internet connection.", file=sys.stderr)
-        return 1
-    except AnalysisError as e:
-        print(f"Analysis failed: {e}", file=sys.stderr)
+    except apierrors.EXPECTED as e:
+        print(apierrors.describe(e, model), file=sys.stderr)
         return 1
     finally:
         log.close()
         print(f"LLM calls are logged in {log.path}", file=sys.stderr)
 
-    for result in results:
-        print(f"## Clusters {', '.join(result.cluster_ids)}\n")
-        print(result.text.strip() + "\n")
+    for line in summary_lines(results):
+        print(line)
     tokens_in = sum(r.input_tokens for r in results)
     tokens_out = sum(r.output_tokens for r in results)
-    print(f"Used {tokens_in:,} input and {tokens_out:,} output tokens.", file=sys.stderr)
+    print(
+        f"Used {tokens_in:,} input and {tokens_out:,} output tokens "
+        f"(estimated cost {estimated_cost(results, model)}).",
+        file=sys.stderr,
+    )
+    warnings = [w for r in results for w in r.warnings]
+    if warnings:
+        print(f"{len(warnings)} problem(s) with the answer; see the page.", file=sys.stderr)
+
+    page = analysis_page(report, results, model, describe_effort(effort, model))
+    path = write_page(page, pages_dir(), name="dupebot-results")
+    print(f"Results page: {path}", file=sys.stderr)
+    if open_browser and not open_in_browser(path):
+        print("Could not open a browser; open the file above yourself.", file=sys.stderr)
     return 0
 
 
-_NO_KEY = (
-    "No Anthropic API key found. Copy .env.example to .env in the BoringBots folder, "
-    "add your key, and run DupeBot from that folder."
-)
+def pages_dir() -> Path:
+    """Results pages go next to the call log, outside the repo."""
+    return default_db_path().parent / "pages"

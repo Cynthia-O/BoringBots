@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     output_chars    INTEGER,           -- text received, in characters
     input_tokens    INTEGER,           -- as billed
     output_tokens   INTEGER,           -- as billed, thinking included
+    thinking_tokens INTEGER,           -- the part of output_tokens spent thinking, as reported
     duration_ms     INTEGER NOT NULL,
     stop_reason     TEXT,              -- end_turn, max_tokens, refusal, ...
     error           TEXT,              -- set when the call failed
@@ -49,9 +50,26 @@ class CallRecord:
     output_chars: int | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    thinking_tokens: int | None = None
     stop_reason: str | None = None
     error: str | None = None
     request_id: str | None = None
+
+
+_TEXT_COLUMNS = frozenset(
+    {
+        "run_id",
+        "called_at",
+        "purpose",
+        "model",
+        "effort",
+        "response_model",
+        "prompt_sha",
+        "stop_reason",
+        "error",
+        "request_id",
+    }
+)
 
 
 def default_db_path() -> Path:
@@ -67,6 +85,18 @@ class CallLog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.path)
         self._conn.executescript(SCHEMA)
+        self._add_missing_columns()
+
+    def _add_missing_columns(self) -> None:
+        """Bring a log made by an older DupeBot up to the current schema. Columns
+        are only ever added, so existing rows are kept as they are (new columns
+        are empty for them)."""
+        have = {row[1] for row in self._conn.execute("PRAGMA table_info(llm_calls)")}
+        with self._conn:
+            for name in CallRecord.__dataclass_fields__:
+                if name not in have:
+                    kind = "TEXT" if name in _TEXT_COLUMNS else "INTEGER"
+                    self._conn.execute(f"ALTER TABLE llm_calls ADD COLUMN {name} {kind}")
 
     def record(self, call: CallRecord) -> None:
         row = asdict(call)
@@ -75,8 +105,14 @@ class CallLog:
         with self._conn:  # commits, so a crash later in the run keeps this row
             self._conn.execute(f"INSERT INTO llm_calls ({columns}) VALUES ({placeholders})", row)
 
-    def rows(self) -> list[dict]:
-        cursor = self._conn.execute("SELECT * FROM llm_calls ORDER BY id")
+    def rows(self, run_id: str | None = None) -> list[dict]:
+        """Every logged call, or only those of one run."""
+        if run_id is None:
+            cursor = self._conn.execute("SELECT * FROM llm_calls ORDER BY id")
+        else:
+            cursor = self._conn.execute(
+                "SELECT * FROM llm_calls WHERE run_id = ? ORDER BY id", (run_id,)
+            )
         names = [d[0] for d in cursor.description]
         return [dict(zip(names, values, strict=True)) for values in cursor]
 

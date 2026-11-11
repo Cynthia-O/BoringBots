@@ -6,7 +6,11 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=2.7,<3",
+    "botview",
 ]
+
+[tool.uv.sources]
+botview = { workspace = true }
 
 [project.scripts]
 dupebot = "dupebot.cli:main"

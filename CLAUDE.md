@@ -15,21 +15,25 @@ This is a uv workspace on Python 3.11+. The root `pyproject.toml` has no code of
 uv sync --all-packages                     # install all bots plus dev tools
 uv run --package dupebot dupebot <dir>
 uv run --package dupebot dupebot <dir> --analyze   # calls the API; key in .env (copy .env.example)
+uv run --package dupebot dupebot [<dir>] --ui      # browser app: folder, settings, scan, send, token/cost tally
 uv run --package formbot formbot <form.pdf|form.docx>
 uv run --package expirybot expirybot <dir>   # likewise catalogbot, tidybot (stubs for now)
 uv run pytest                              # all tests
-uv run pytest bots/formbot                 # one bot
+uv run pytest bots/formbot                 # one bot (or packages/botview)
 uv run pytest bots/formbot/tests/test_cli.py::test_accepts_pdf   # one test
 uv run ruff check . && uv run ruff format .
 ```
 
-To add a bot, copy an existing bot's folder layout. It is picked up automatically through the `bots/*` glob. Add a bot's runtime dependencies to that bot's own `pyproject.toml`, not the root one. Only create shared code (`packages/botcommon`, then add `packages/*` to the workspace members) once two bots actually need the same code.
+To add a bot, copy an existing bot's folder layout. It is picked up automatically through the `bots/*` glob. Add a bot's runtime dependencies to that bot's own `pyproject.toml`, not the root one. Code shared between bots lives in `packages/*` (also workspace members); a bot depends on a package by listing it in `dependencies` plus `[tool.uv.sources] <pkg> = { workspace = true }`. Otherwise, only move code into a shared package once two bots actually need it.
+
+**Shared browser UI (`packages/botview`):** every bot shows results to the user in a local browser page built with botview, not as tables in the terminal. A bot describes the page as data (`Page`, `Section`, `Card`, `Table`, `Text`, `Badge`); botview renders a self-contained HTML file (no web requests), writes it as a new file, and opens it. Keep bot-specific content in the bot (e.g. `dupebot/view.py`) and keep botview generic. For interactive use, botview also runs a live app (`LiveServer`): a local page with settings controls (`Choice`, `Slider`) whose actions call the bot's `handle()`; see `dupebot/ui.py`. Anything that spends money goes through a `Confirm` step first.
 
 ## Design rule shared by all bots: create, but never edit or delete
 
 No bot may edit or delete the user's existing files or documents. Bots may create new files, such as reports or the per-folder READMEs CatalogBot writes. This is a hard limit on capability, not a UX preference: any change to existing content is the user's job, so do not give a bot tools that edit or delete, even as an option. This means:
 - **Never overwrite.** Writing over a file that already exists counts as editing it. If a target file exists, skip it or write to a new name.
 - **Never move or rename.** Either one removes the file from its original location.
+- **Showing is fine.** Opening a file's folder in Finder (DupeBot's Show in Finder: an AppleScript that opens a new window and selects the file, falling back to `open -R`) changes nothing and is allowed. A person-clicked "Move to Trash" button was discussed (2026-11-10) and not built; it would need a deliberate change to this rule first.
 
 ## Planned bots
 

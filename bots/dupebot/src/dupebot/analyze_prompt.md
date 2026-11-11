@@ -34,7 +34,7 @@ You receive a JSON object. Each entry in `clusters` has a `cluster_id`, an `exte
 
 ## Your task
 
-For each cluster, work out which of these relationships hold among its files, citing the names, sizes, dates and authors that support each conclusion:
+For each cluster, sort its files into groups of files that relate to one another in one of these ways:
 
 - **Copies:** the same document stored more than once, for example a `(1)` or `Copy of` file next to its original.
 - **Version series:** drafts and revisions of one document. Identify the most likely current version and which files are earlier.
@@ -43,4 +43,4 @@ For each cluster, work out which of these relationships hold among its files, ci
 - **Parts:** pages or sections of one document.
 - **Unrelated:** files grouped only because of how the method works.
 
-A cluster can contain several of these at once. Say how confident you are in each conclusion, and point out anything the person should check before deleting, such as opening both files to compare them.
+A cluster can contain several groups, and every file belongs to exactly one. A file that relates to nothing else in its cluster goes in an unrelated group. Back each group with the names, sizes, dates and authors that support it, say how confident you are, and point out anything the person should check before deleting, such as opening both files to compare them.
