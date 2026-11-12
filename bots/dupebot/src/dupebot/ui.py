@@ -25,6 +25,7 @@ from botview import (
     Reply,
     Section,
     Slider,
+    Stage,
     Table,
     Text,
     TextField,
@@ -40,10 +41,20 @@ from dupebot.analyze import (
 )
 from dupebot.calllog import CallLog, default_db_path
 from dupebot.cluster import DEFAULT_THRESHOLD, cluster_records, scan
-from dupebot.pricing import PRICES_CHECKED, Cost, call_cost, usd
 from dupebot.report import build_report
 from dupebot.settings import MODEL_DEFAULT_EFFORT, describe_effort
-from dupebot.view import analysis_page, clusters_page
+from dupebot.suggest import suggest, suggestion_cap
+from dupebot.view import clusters_page, results_page
+from finops.pricing import PRICES_CHECKED, Cost, call_cost, usd
+
+# The folder the page starts on when none is given on the command line.
+DEFAULT_FOLDER = "~/Desktop"
+
+STAGE_TITLES = ("Choose folder and settings", "Analysis", "Prioritization agent")
+ANALYSIS_WAITING = "Starts when you send the scanned clusters to the model."
+AGENT_WAITING = (
+    "Starts once every cluster is answered, then picks the clean-ups most worth your attention."
+)
 
 
 @dataclass
@@ -147,7 +158,7 @@ class TokenTally:
         if s.unpriced:
             blocks.append(
                 Text(
-                    f"{s.unpriced} call(s) used a model with no price in pricing.py and are "
+                    f"{s.unpriced} call(s) used a model with no price in finops/pricing.py and are "
                     "left out of the costs.",
                     tone="warning",
                 )
@@ -157,7 +168,8 @@ class TokenTally:
             Text(
                 f"Prices last checked {checked:%-d %B %Y}. Prices change over time, so "
                 "these costs are estimates at the standard API prices on that date "
-                "(dupebot/pricing.py). Your Claude Console invoice is the final word.",
+                "(packages/finops/src/finops/pricing.py). Your Claude Console invoice is "
+                "the final word.",
                 fine_print=True,
             )
         )
@@ -195,7 +207,8 @@ class DupeBotApp:
         self.client = client
         self.title = "DupeBot"
         self.subtitle = (
-            "Choose settings, scan to see the clusters (free), then send them to the model."
+            "Suggestions only: DupeBot never deletes, moves or changes files. "
+            "Open and compare before you delete anything."
         )
         self.facts: list[tuple[str, str]] = []
         model_options = [Option(c.model, c.label or c.model, c.note) for c in MODEL_CHOICES]
@@ -204,8 +217,8 @@ class DupeBotApp:
             TextField(
                 "folder",
                 "Folder to scan",
-                default=str(root) if root else "",
-                placeholder="~/Documents",
+                default=str(root) if root else DEFAULT_FOLDER,
+                placeholder="Type a folder path, e.g. ~/Desktop",
                 help="The full path of a folder on this Mac; ~ means your home folder. "
                 "Subfolders are included. To copy a folder's path in Finder, right-click it, "
                 "hold Option, and choose Copy as Pathname.",
@@ -244,6 +257,12 @@ class DupeBotApp:
         # Files this session's scans found, by an opaque id. "Show in Finder"
         # only accepts these ids, never a path sent by the page.
         self._files: dict[str, Path] = {}
+        self._update = lambda status=None, page=None: None  # replaced by botview
+        self._stages = [
+            ("todo", "Pick a folder, change any settings, then Scan folder. Scanning is free."),
+            ("todo", ANALYSIS_WAITING),
+            ("todo", AGENT_WAITING),
+        ]
 
     def footer(self) -> list[Section]:
         return [self.tally.section(default_db_path())]
@@ -273,7 +292,22 @@ class DupeBotApp:
         clusters = cluster_records(scan_result.records, threshold)
         report = build_report(root, scan_result, clusters, threshold)
         page = clusters_page(report, self._reveal_button)
+        n_clusters, n_files = len(report["clusters"]), report["summary"]["files_in_clusters"]
+        self._stage(
+            1,
+            "done",
+            f"Scanned {root}: {n_clusters} clusters, {n_files} files. "
+            "Change anything and scan again, or send below.",
+        )
+        self._stage(2, "todo", ANALYSIS_WAITING)
+        self._stage(3, "todo", AGENT_WAITING)
         if not report["clusters"]:
+            self._stage(
+                1,
+                "done",
+                f"Scanned {root}: no clusters at this threshold. "
+                "Try a lower threshold or another folder.",
+            )
             return Reply(page=page, status="No clusters at this threshold.")
         self._pending = {}  # only the latest scan can be sent
         pending_id = uuid.uuid4().hex
@@ -284,7 +318,13 @@ class DupeBotApp:
             f"Send {len(report['clusters'])} clusters ({n_files} files) to {model} "
             f"(thinking effort: {describe_effort(effort, model)}) in {n_requests} request(s)?\n"
             "Sent: each file's path below the scanned folder, size, modified time and "
-            "authors. Not sent: file contents."
+            "authors. Not sent: file contents.\n"
+            "Each cluster's answer appears as it arrives. Then DupeBot's prioritization agent "
+            f"picks up to {suggestion_cap(len(report['clusters']))} clean-ups most worth your "
+            "attention (25, or a quarter of the clusters, whichever is smaller). "
+            "To check its picks it may compare two "
+            "files on this Mac (only the result is sent) and list folders inside the scanned "
+            "folder (names, sizes and dates are sent). It cannot change any file."
         )
         return Reply(
             page=page,
@@ -292,37 +332,124 @@ class DupeBotApp:
             status=f"Found {len(report['clusters'])} clusters.",
         )
 
+    def use_updates(self, update) -> None:
+        """botview hands over a function for showing progress during a long action."""
+        self._update = update
+
+    def stages(self) -> list[Stage]:
+        """The three stages of a round, shown at the top of the page."""
+        return [Stage(STAGE_TITLES[i], d, state) for i, (state, d) in enumerate(self._stages)]
+
+    def _stage(self, number: int, state: str, detail: str) -> None:
+        self._stages[number - 1] = (state, detail)
+
     def _send(self, pending_id: str) -> Reply:
+        """Analyse the scanned clusters, showing each answer as it arrives, then let
+        the prioritization agent pick the clean-ups worth attention and move them
+        to the top of the same page."""
         pending = self._pending.pop(pending_id, None)
         if pending is None:
             return Reply(error="That scan is no longer current. Scan again, then send.")
+        report, model = pending.report, pending.model
+        effort = describe_effort(pending.effort, model)
+        total = len(report["clusters"])
+        answers: dict[str, dict] = {}
+
+        def show(status: str | None = None) -> None:
+            page = results_page(report, answers, model, effort, self._reveal_button, live=True)
+            self._update(status=status, page=page)
+
+        def arrived(entry: dict) -> None:
+            answers[entry["cluster_id"]] = entry
+            self._stage(
+                2,
+                "active",
+                f"{len(answers)} of {total} clusters answered. "
+                "The model sees only names, sizes, dates and authors.",
+            )
+            show()
+
+        def agent_progress(text: str) -> None:
+            self._stage(3, "active", f"Working: {text}")
+            show(status=f"Prioritization agent: {text}")
+
+        self._stage(2, "active", f"Sent {total} clusters. The model is thinking…")
+        self._stage(3, "todo", AGENT_WAITING)
+        show()
         run_id = uuid.uuid4().hex
         log = CallLog()
+        results = suggestions = problem = None
         try:
             results = analyze(
-                pending.report,
-                model=pending.model,
+                report,
+                model=model,
                 client=self.client,
                 log=log,
                 effort=pending.effort,
                 run_id=run_id,
+                progress=lambda text: self._update(status=text),
+                on_cluster=arrived,
+            )
+            answers = {c["cluster_id"]: c for r in results for c in r.clusters}  # checked
+            self._stage(2, "done", f"All {total} clusters answered.")
+            agent_progress("starting…")
+            suggestions = suggest(
+                report,
+                results,
+                model=model,
+                client=self.client,
+                log=log,
+                effort=pending.effort,
+                run_id=run_id,
+                progress=agent_progress,
             )
         except apierrors.EXPECTED as e:
-            return Reply(error=apierrors.describe(e, pending.model))
+            problem = apierrors.describe(e, model)
         finally:
             # Counted from the log, so billed calls that failed are included too.
             rows = log.rows(run_id)
             log.close()
             if rows:
-                self.tally.add_run(rows, f"{datetime.now():%H:%M}, {pending.model}")
-        effort = describe_effort(pending.effort, pending.model)
-        page = analysis_page(pending.report, results, pending.model, effort, self._reveal_button)
-        path = write_page(page, default_db_path().parent / "pages", name="dupebot-results")
-        warnings = sum(len(r.warnings) for r in results)
-        status = f"Done. Saved a copy to {path}"
-        if warnings:
-            status += f" ({warnings} problem(s) with the answer; see the top of the results)"
-        return Reply(page=page, status=status)
+                self.tally.add_run(rows, f"{datetime.now():%H:%M}, {model}")
+        if results is None:
+            self._stage(2, "todo", f"Did not finish: {problem} Scan and send again to retry.")
+            return Reply(error=problem)
+
+        run_cost = Usage()
+        for row in rows:
+            run_cost.add_call(row)
+        warnings = [w for r in results for w in r.warnings]
+        if suggestions is not None:
+            warnings += suggestions.warnings
+        common = dict(suggestions=suggestions, cost=usd(run_cost.cost.total), warnings=warnings)
+        page = results_page(
+            report, answers, model, effort, self._reveal_button, live=True, **common
+        )
+        saved = results_page(
+            report,
+            answers,
+            model,
+            effort,
+            self._reveal_button,
+            agent_note=None if suggestions else f"Did not finish: {problem}",
+            **common,
+        )
+        path = write_page(saved, default_db_path().parent / "pages", name="dupebot-results")
+        if suggestions is None:
+            self._stage(3, "todo", f"Did not finish: {problem}")
+            return Reply(
+                page=page,
+                error=f"The prioritization agent failed: {problem}",
+                status=f"Analysis saved to {path}",
+            )
+        picks = len(suggestions.suggestions)
+        self._stage(
+            3,
+            "done",
+            f"{suggestions.summary} {picks} pick(s), shown first below, after "
+            f"{len(suggestions.checks)} check(s).".strip(),
+        )
+        return Reply(page=page, status=f"Done. Saved a copy to {path}")
 
     def _reveal_button(self, path: str) -> Action:
         file_id = hashlib.sha256(path.encode("utf-8")).hexdigest()[:16]

@@ -46,6 +46,15 @@ uv run dupebot --ui
 
 Press Ctrl+C in Terminal to stop it.
 
+## Spend
+To see what all the bots have spent on model calls, by day:
+
+```sh
+uv run spend
+```
+
+This opens a dashboard with your total estimated spend, charts of spend per day, cumulative spend and tokens per day, and a day-by-day table. It only reads the bots' call logs, and each run writes a new page under `~/.boringbots/dashboards/`. The dollar figures are estimates based on the prices in `packages/finops/src/finops/pricing.py`; your Claude Console invoice is the final word.
+
 ## [DupeBot](bots/dupebot/)
 DupeBot helps you clear out clutter by finding files on your Mac and in Google Drive that are likely duplicates, older versions or convenience copies of one another. It groups candidate files by name and file type, then explains what it found so you can decide what to delete. It never deletes anything itself, so that decision always stays with you.
 

@@ -4,11 +4,17 @@ The model only saw relative paths, so each file in its answer is matched back
 to the full report entry for its size, dates and authors.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from botview import Action, Badge, Card, Page, Section, Table, Text
-from dupebot.analyze import DELETION_CANDIDATE_ROLES, BatchResult, analysis_input
-from dupebot.pricing import Cost, call_cost, usd
+from dupebot.analyze import (
+    DELETION_CANDIDATE_ROLES,
+    BatchResult,
+    analysis_input,
+    relative_entries,
+)
+from dupebot.suggest import Suggestion, SuggestResult
+from finops.pricing import Cost, call_cost, usd
 
 RELATIONSHIP_LABELS = {
     "copies": "Copies",
@@ -25,87 +31,163 @@ ROLE_LABELS = {
     "copy": "copy",
     "member": "",
 }
-CONFIDENCE_TONES = {"high": "good", "medium": "info", "low": "caution"}
 
 # Makes the "Show in Finder" button for a file, given its full path from the
 # scan. Only the live browser app passes one; pages without it have no buttons.
 Reveal = Callable[[str], Action]
 
 
-def analysis_page(
+def results_page(
     report: dict,
-    results: list[BatchResult],
+    answers: dict[str, dict],
     model: str,
     effort: str,
     reveal: Reveal | None = None,
+    suggestions: SuggestResult | None = None,
+    agent_note: str | None = None,
+    cost: str | None = None,
+    warnings: Sequence[str] = (),
+    live: bool = False,
 ) -> Page:
-    """effort is the human-readable effort, e.g. "model default (medium)"."""
-    entries = _entries_by_relative_path(report)
-    answers = {c["cluster_id"]: c for r in results for c in r.clusters}
-    warnings = [w for r in results for w in r.warnings]
+    """The one results page, drawn again as a run progresses.
+
+    answers maps cluster_id to the analysis answer for each cluster that has
+    arrived so far; the rest show as waiting, so the page fills in from the top
+    down. agent_note says what the prioritization agent is doing. Once its
+    suggestions are given, the clusters it picked move to the top, in its order,
+    with all other clusters below. effort is the human-readable effort.
+
+    live: shown inside the browser app, whose stage tracker already says what the
+    agent is doing and that these are only suggestions, so those notices are left
+    out. Saved copies have no tracker and keep them.
+    """
+    entries = relative_entries(report)
+    clusters = report["clusters"]
+    done = suggestions is not None
     candidates = sum(
         1
-        for c in answers.values()
-        for g in c["groups"]
+        for a in answers.values()
+        for g in a["groups"]
         for f in g["files"]
         if f["role"] in DELETION_CANDIDATE_ROLES
     )
-    summary = report["summary"]
     facts = [
         ("Folder", report["root"]),
         ("Model", model),
         ("Thinking effort", effort),
         ("Similarity threshold", str(report["settings"]["similarity_threshold"])),
-        ("Clusters", str(summary["clusters"])),
-        ("Files in clusters", str(summary["files_in_clusters"])),
+        ("Clusters answered", f"{len(answers)} of {len(clusters)}"),
         ("To consider deleting", str(candidates)),
-        (
-            "Tokens in / out",
-            f"{sum(r.input_tokens for r in results):,} / {sum(r.output_tokens for r in results):,}",
-        ),
-        ("Estimated cost", estimated_cost(results, model)),
     ]
-    notices = [
-        Text(
-            "These are suggestions from a language model that saw only file names, sizes, "
-            "dates and authors, never contents. Highlighted files are ones to consider "
-            "deleting; open and compare before you delete anything. DupeBot itself never "
-            "deletes, moves or changes files.",
-            tone="info",
-        )
-    ]
-    if warnings:
+    if done:
+        facts.append(("Prioritized", f"{len(suggestions.suggestions)} (limit {suggestions.cap})"))
+    if cost:
+        facts.append(("Estimated cost", cost))
+
+    notices = []
+    if not live:
         notices.append(
             Text(
-                "The answer did not match the input exactly: " + "; ".join(warnings),
-                tone="warning",
-                label=f"{len(warnings)} problem(s)",
+                "These are suggestions from a language model that saw only file names, sizes, "
+                "dates and authors, plus the checks listed below. Open and compare before you "
+                "delete anything. DupeBot itself never deletes, moves or changes files.",
+                tone="info",
             )
         )
+        if agent_note:
+            notices.append(Text(agent_note, tone="info", label="Prioritization agent"))
+        elif done and suggestions.summary:
+            notices.append(Text(suggestions.summary, tone="good", label="Prioritization agent"))
+    if warnings:
+        notices.append(
+            Text(" ".join(warnings), tone="warning", label=f"{len(warnings)} problem(s)")
+        )
+
+    picked: dict[str, list[Suggestion]] = {}
+    for s in suggestions.suggestions if done else []:
+        picked.setdefault(s.cluster_id, []).append(s)
+    by_id = {c["cluster_id"]: c for c in clusters}
     sections = []
-    for cluster in report["clusters"]:
-        cid = cluster["cluster_id"]
-        answer = answers.get(cid)
-        if answer is None:
-            sections.append(
-                Section(cid, [Badge(cluster["extension"])], [Text("Not analysed.", "warning")])
+    rank = 0
+    for cid, items in picked.items():  # the agent's order: its safest pick first
+        rank += 1
+        cards = [_suggestion_card(s, entries.get(cid, {}), reveal) for s in items]
+        sections.append(
+            _cluster_section(
+                by_id[cid],
+                answers.get(cid),
+                entries.get(cid, {}),
+                reveal,
+                extra=cards,
+                priority=rank,
             )
-            continue
-        n = sum(
-            1 for g in answer["groups"] for f in g["files"] if f["role"] in DELETION_CANDIDATE_ROLES
         )
-        badges = [Badge(cluster["extension"])]
-        if n:
-            badges.append(Badge(f"{n} to consider deleting", "caution"))
-        cards = [_group_card(g, entries.get(cid, {}), reveal) for g in answer["groups"]]
-        sections.append(Section(cid, badges, cards))
+    rest = [c for c in clusters if c["cluster_id"] not in picked]
+    if picked and rest:
+        sections.append(
+            Section(
+                "Other clusters",
+                [Badge(f"{len(rest)} clusters")],
+                [
+                    Text(
+                        "Everything else the analysis found, in scan order. Check here for "
+                        "anything the agent passed over."
+                    )
+                ],
+            )
+        )
+    for cluster in rest:
+        cid = cluster["cluster_id"]
+        sections.append(_cluster_section(cluster, answers.get(cid), entries.get(cid, {}), reveal))
+    if done and suggestions.checks:
+        rows = [[c.tool.replace("_", " "), c.target, c.outcome] for c in suggestions.checks]
+        tones = ["warning" if c.is_error else None for c in suggestions.checks]
+        sections.append(
+            Section(
+                "What the prioritization agent checked",
+                [Badge("read-only")],
+                [
+                    Text(
+                        "The agent chose these checks itself. File comparisons ran on this "
+                        "Mac; only the result was sent to the model."
+                    ),
+                    Table(["Check", "On", "Result"], rows, row_tones=tones),
+                ],
+            )
+        )
     return Page(
         title="DupeBot results",
-        subtitle="Likely copies and older versions, grouped by the analyst model.",
+        subtitle="Likely copies and older versions, with the agent's picks first.",
         facts=facts,
         notices=notices,
         sections=sections,
+        searchable=done,  # redrawn while streaming, which would reset a filter
     )
+
+
+def _cluster_section(
+    cluster: dict,
+    answer: dict | None,
+    entries: dict[str, dict],
+    reveal: Reveal | None,
+    extra: Sequence[Card] = (),
+    priority: int | None = None,
+) -> Section:
+    badges = []
+    if priority is not None:
+        badges.append(Badge(f"priority {priority}", "info"))
+    badges.append(Badge(cluster["extension"]))
+    if answer is None:
+        badges.append(Badge("waiting for the model…"))
+        n = len(cluster["files"])
+        return Section(cluster["cluster_id"], badges, [Text(f"{n} files, not answered yet.")])
+    n = sum(
+        1 for g in answer["groups"] for f in g["files"] if f["role"] in DELETION_CANDIDATE_ROLES
+    )
+    if n:
+        badges.append(Badge(f"{n} to consider deleting", "caution"))
+    cards = [_group_card(g, entries, reveal) for g in answer["groups"]]
+    return Section(cluster["cluster_id"], badges, [*extra, *cards])
 
 
 def _group_card(group: dict, entries: dict[str, dict], reveal: Reveal | None) -> Card:
@@ -145,12 +227,7 @@ def _group_card(group: dict, entries: dict[str, dict], reveal: Reveal | None) ->
         blocks.append(
             Text(group["check_before_deleting"], tone="caution", label="Check before deleting")
         )
-    confidence = group["confidence"]
-    return Card(
-        RELATIONSHIP_LABELS.get(group["relationship"], group["relationship"]),
-        [Badge(f"{confidence} confidence", CONFIDENCE_TONES.get(confidence, "neutral"))],
-        blocks,
-    )
+    return Card(RELATIONSHIP_LABELS.get(group["relationship"], group["relationship"]), [], blocks)
 
 
 def estimated_cost(results: list[BatchResult], model: str) -> str:
@@ -174,20 +251,9 @@ def summary_lines(results: list[BatchResult]) -> list[str]:
                 n = sum(1 for f in g["files"] if f["role"] in DELETION_CANDIDATE_ROLES)
                 label = RELATIONSHIP_LABELS.get(g["relationship"], g["relationship"]).lower()
                 extra = f", {n} to consider deleting" if n else ""
-                parts.append(f"{label} ({len(g['files'])} files{extra}, {g['confidence']})")
+                parts.append(f"{label} ({len(g['files'])} files{extra})")
             lines.append(f"{c['cluster_id']}: " + "; ".join(parts))
     return lines
-
-
-def _entries_by_relative_path(report: dict) -> dict[str, dict[str, dict]]:
-    """cluster_id -> {path as the model saw it -> full report entry}."""
-    sent = analysis_input(report)["clusters"]
-    return {
-        full["cluster_id"]: {
-            s["path"]: f for s, f in zip(trimmed["files"], full["files"], strict=True)
-        }
-        for full, trimmed in zip(report["clusters"], sent, strict=True)
-    }
 
 
 def _size(n: int | None) -> str:
@@ -241,3 +307,33 @@ def clusters_page(report: dict, reveal: Reveal | None = None) -> Page:
         facts=facts,
         sections=sections,
     )
+
+
+def _suggestion_card(s: Suggestion, entries: dict[str, dict], reveal: Reveal | None) -> Card:
+    """One of the agent's picks: the file to consider deleting and the one to keep."""
+    badges = []
+    if s.identical is True:
+        badges.append(Badge("identical contents (checked)", "good"))
+    elif s.identical is False:
+        badges.append(Badge("contents differ (checked)", "neutral"))
+    rows, tones = [], []
+    for role, rel, tone in (("Consider deleting", s.delete, "caution"), ("Keep", s.keep, "good")):
+        entry = entries.get(rel, {})
+        row = [
+            role,
+            rel,
+            _size(entry.get("size_bytes")),
+            (entry.get("modified") or "").replace("T", " "),
+        ]
+        if reveal:
+            row.append(reveal(entry["path"]) if "path" in entry else None)
+        rows.append(row)
+        tones.append(tone)
+    table = Table(
+        ["", "File", "Size", "Modified"] + ([""] if reveal else []),
+        rows,
+        row_tones=tones,
+        numeric=frozenset({2}),
+    )
+    title = f"Suggested: delete {s.delete.rsplit('/', 1)[-1]}"
+    return Card(title, badges, [Text(s.reason), table])

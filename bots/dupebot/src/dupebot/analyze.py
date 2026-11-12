@@ -14,6 +14,7 @@ import hashlib
 import json
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.resources import files
@@ -68,7 +69,6 @@ RELATIONSHIPS = ("copies", "version_series", "variants", "recurring", "parts", "
 ROLES = ("current_version", "earlier_version", "original", "copy", "member")
 # Roles that make a file a candidate for the person to consider deleting.
 DELETION_CANDIDATE_ROLES = frozenset({"earlier_version", "copy"})
-CONFIDENCE_LEVELS = ("high", "medium", "low")
 
 # The shape of every answer, enforced by the API. Descriptions here are read by
 # the model, so field meanings live with the fields rather than in the prompt.
@@ -117,7 +117,6 @@ OUTPUT_SCHEMA = {
                                     "names, sizes, dates and authors. One to three sentences.",
                                 },
                                 "relationship": {"type": "string", "enum": list(RELATIONSHIPS)},
-                                "confidence": {"type": "string", "enum": list(CONFIDENCE_LEVELS)},
                                 "check_before_deleting": {
                                     "type": "string",
                                     "description": "What the person should check before "
@@ -128,7 +127,6 @@ OUTPUT_SCHEMA = {
                                 "files",
                                 "reason",
                                 "relationship",
-                                "confidence",
                                 "check_before_deleting",
                             ],
                             "additionalProperties": False,
@@ -143,6 +141,10 @@ OUTPUT_SCHEMA = {
     "required": ["clusters"],
     "additionalProperties": False,
 }
+
+
+# Receives a short line of text describing how far a run has got.
+Progress = Callable[[str], None]
 
 
 class AnalysisError(Exception):
@@ -209,12 +211,16 @@ def analyze(
     log: CallLog | None = None,
     effort: str | None = None,
     run_id: str | None = None,
+    progress: Progress | None = None,
+    on_cluster: Callable[[dict], None] | None = None,
 ) -> list[BatchResult]:
     """Send the report's clusters to the model, one request per batch.
 
     effort sets how much the model thinks (see EFFORT_LEVELS); None leaves the
     model's default. Every request, including failed ones, is recorded in log
-    when one is given, under run_id (a new one when None).
+    when one is given, under run_id (a new one when None). While answers stream
+    in, on_cluster (if given) receives each cluster's answer as soon as it is
+    complete, and progress (if given) a short line of text on how far it has got.
     """
     if effort is not None and effort not in EFFORT_LEVELS:
         raise ValueError(f"effort must be one of {', '.join(EFFORT_LEVELS)}, got {effort!r}")
@@ -226,8 +232,25 @@ def analyze(
     prompt_sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
     run_id = run_id or uuid.uuid4().hex
     results = []
-    for batch in batch_clusters(analysis_input(report)["clusters"]):
+    batches = batch_clusters(analysis_input(report)["clusters"])
+    total = sum(len(b) for b in batches)
+    done = 0
+    for number, batch in enumerate(batches, 1):
         payload = json.dumps({"clusters": batch}, ensure_ascii=False)
+        where = f" (request {number} of {len(batches)})" if len(batches) > 1 else ""
+        answered = done
+
+        def arrived(entry: dict, where: str = where) -> None:
+            nonlocal answered
+            answered += 1
+            if on_cluster:
+                on_cluster(entry)
+            if progress:
+                progress(f"Analysing: {answered} of {total} clusters answered{where}")
+
+        stream = ClusterStream(arrived) if (progress or on_cluster) else None
+        if progress:
+            progress(f"Sent {done + len(batch)} of {total} clusters{where}. The model is thinking…")
         call = {
             "run_id": run_id,
             "called_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -237,42 +260,17 @@ def analyze(
             "prompt_sha": prompt_sha,
             "input_chars": len(prompt) + len(payload),
         }
-        started = time.monotonic()
-        try:
-            # Streaming keeps long answers from hitting HTTP timeouts.
-            with client.messages.stream(
-                model=model,
-                max_tokens=MAX_OUTPUT_TOKENS,
-                system=prompt,
-                messages=[{"role": "user", "content": payload}],
-                output_config=output_config,
-            ) as stream:
-                message = stream.get_final_message()
-        except Exception as e:
-            if log:
-                log.record(
-                    CallRecord(
-                        **call, duration_ms=_ms_since(started), error=f"{type(e).__name__}: {e}"
-                    )
-                )
-            raise
-        text = "".join(b.text for b in message.content if b.type == "text")
-        details = getattr(message.usage, "output_tokens_details", None)
-        thinking_tokens = getattr(details, "thinking_tokens", None)
-        if log:
-            log.record(
-                CallRecord(
-                    **call,
-                    duration_ms=_ms_since(started),
-                    response_model=getattr(message, "model", None),
-                    output_chars=len(text),
-                    input_tokens=message.usage.input_tokens,
-                    output_tokens=message.usage.output_tokens,
-                    thinking_tokens=thinking_tokens,
-                    stop_reason=message.stop_reason,
-                    request_id=getattr(message, "_request_id", None),
-                )
-            )
+        message, text, thinking_tokens = stream_and_log(
+            client,
+            log,
+            call,
+            model=model,
+            max_tokens=MAX_OUTPUT_TOKENS,
+            system=prompt,
+            messages=[{"role": "user", "content": payload}],
+            output_config=output_config,
+            on_text=stream.feed if stream else None,
+        )
         if message.stop_reason == "refusal":
             raise AnalysisError("the model declined to analyse this batch")
         if message.stop_reason == "max_tokens":
@@ -293,7 +291,109 @@ def analyze(
                 thinking_tokens=thinking_tokens,
             )
         )
+        done += len(batch)
+        if progress:
+            progress(f"{done} of {total} clusters analysed and logged.")
     return results
+
+
+def stream_and_log(
+    client,
+    log: CallLog | None,
+    call: dict,
+    on_text: Callable[[str], None] | None = None,
+    **request,
+):
+    """Make one streamed model call and log it, failed or not.
+
+    call holds the log fields known before the call (run_id, purpose, model, ...).
+    on_text, if given, receives the answer's visible text piece by piece as it
+    streams in (thinking is not included).
+    Returns the final message, its visible text, and its thinking token count
+    (None when the API does not report it). Shared by every DupeBot model call so
+    each one is logged and counted the same way.
+    """
+    started = time.monotonic()
+    try:
+        # Streaming keeps long answers from hitting HTTP timeouts.
+        with client.messages.stream(**request) as stream:
+            if on_text is not None:
+                for piece in stream.text_stream:
+                    on_text(piece)
+            message = stream.get_final_message()
+    except Exception as e:
+        if log:
+            log.record(
+                CallRecord(**call, duration_ms=_ms_since(started), error=f"{type(e).__name__}: {e}")
+            )
+        raise
+    text = "".join(b.text for b in message.content if b.type == "text")
+    details = getattr(message.usage, "output_tokens_details", None)
+    thinking_tokens = getattr(details, "thinking_tokens", None)
+    if log:
+        log.record(
+            CallRecord(
+                **call,
+                duration_ms=_ms_since(started),
+                response_model=getattr(message, "model", None),
+                output_chars=len(text),
+                input_tokens=message.usage.input_tokens,
+                output_tokens=message.usage.output_tokens,
+                thinking_tokens=thinking_tokens,
+                stop_reason=message.stop_reason,
+                request_id=getattr(message, "_request_id", None),
+            )
+        )
+    return message, text, thinking_tokens
+
+
+class ClusterStream:
+    """Picks complete cluster entries out of an answer while it streams in.
+
+    The answer is {"clusters": [{...}, {...}, ...]}. Each time an entry's closing
+    brace arrives, the entry is decoded and passed to on_cluster, so a page can
+    show it before the rest of the answer exists. The final, complete answer is
+    still parsed and checked as usual; this is only for showing progress.
+    """
+
+    def __init__(self, on_cluster: Callable[[dict], None]):
+        self.on_cluster = on_cluster
+        self.text = ""
+        self.pos: int | None = None  # where the next entry may start, once "[" is seen
+        self.decoder = json.JSONDecoder()
+
+    def feed(self, piece: str) -> None:
+        self.text += piece
+        if self.pos is None:
+            key = self.text.find('"clusters"')
+            start = self.text.find("[", key) if key >= 0 else -1
+            if start < 0:
+                return
+            self.pos = start + 1
+        while True:
+            i = self.pos
+            while i < len(self.text) and self.text[i] in " \t\r\n,":
+                i += 1
+            if i >= len(self.text) or self.text[i] != "{":
+                return  # nothing more yet, or the end of the list
+            try:
+                entry, end = self.decoder.raw_decode(self.text, i)
+            except json.JSONDecodeError:
+                return  # this entry is still arriving
+            self.pos = end
+            if isinstance(entry, dict) and "cluster_id" in entry:
+                self.on_cluster(entry)
+
+
+def relative_entries(report: dict) -> dict[str, dict[str, dict]]:
+    """cluster_id -> {path as the model sees it -> full report entry}."""
+    sent = analysis_input(report)["clusters"]
+    return {
+        full["cluster_id"]: {
+            s["path"]: f for s, f in zip(trimmed["files"], full["files"], strict=True)
+        }
+        for full, trimmed in zip(report["clusters"], sent, strict=True)
+    }
 
 
 def check_answer(batch: list[dict], answer: list[dict]) -> list[str]:

@@ -43,4 +43,4 @@ For each cluster, sort its files into groups of files that relate to one another
 - **Parts:** pages or sections of one document.
 - **Unrelated:** files grouped only because of how the method works.
 
-A cluster can contain several groups, and every file belongs to exactly one. A file that relates to nothing else in its cluster goes in an unrelated group. Back each group with the names, sizes, dates and authors that support it, say how confident you are, and point out anything the person should check before deleting, such as opening both files to compare them.
+A cluster can contain several groups, and every file belongs to exactly one. A file that relates to nothing else in its cluster goes in an unrelated group. Back each group with the names, sizes, dates and authors that support it, and point out anything the person should check before deleting, such as opening both files to compare them.

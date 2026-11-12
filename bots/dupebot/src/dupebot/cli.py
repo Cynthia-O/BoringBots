@@ -24,7 +24,7 @@ from dupebot.env import load_dotenv
 from dupebot.report import build_report
 from dupebot.settings import MODEL_DEFAULT_EFFORT, ask_settings, describe_effort, parse_threshold
 from dupebot.ui import DupeBotApp
-from dupebot.view import analysis_page, estimated_cost, summary_lines
+from dupebot.view import estimated_cost, results_page, summary_lines
 
 
 def _threshold_arg(text: str) -> float:
@@ -208,7 +208,15 @@ def run_analysis(
     if warnings:
         print(f"{len(warnings)} problem(s) with the answer; see the page.", file=sys.stderr)
 
-    page = analysis_page(report, results, model, describe_effort(effort, model))
+    answers = {c["cluster_id"]: c for r in results for c in r.clusters}
+    page = results_page(
+        report,
+        answers,
+        model,
+        describe_effort(effort, model),
+        cost=estimated_cost(results, model),
+        warnings=[w for r in results for w in r.warnings],
+    )
     path = write_page(page, pages_dir(), name="dupebot-results")
     print(f"Results page: {path}", file=sys.stderr)
     if open_browser and not open_in_browser(path):

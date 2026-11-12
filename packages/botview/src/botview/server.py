@@ -34,6 +34,7 @@ from botview.controls import (
     to_json_script,
 )
 from botview.page import CSS, Page, Section, document, facts_html, render_body, section_html
+from botview.stages import STAGES_CSS, stages_html
 
 MAX_REQUEST_BYTES = 1_000_000
 
@@ -69,6 +70,17 @@ class App(Protocol):
 
     def footer(self) -> Sequence[Section]: ...
 
+    # Optional: def stages(self) -> Sequence[Stage]
+    # Numbered stages shown under the title and redrawn after every action and
+    # live update, so the person can see which step the work is on.
+
+    # Optional: def use_updates(self, update: Update) -> None
+    # If the app has it, LiveServer calls it once with a function the app can
+    # call during a long handle() to show progress while it works:
+    # update(status="12 of 35 clusters answered", page=partial_page). The page
+    # polls for these, shows the status line instead of a bare timer, and
+    # redraws the results area whenever a new page arrives.
+
 
 class LiveServer:
     """Serves one App on 127.0.0.1. Use start() in tests, serve() for real."""
@@ -77,6 +89,12 @@ class LiveServer:
         self.app = app
         self.key = secrets.token_urlsafe(24)
         self._busy = threading.Lock()
+        # What the running action last reported: (version, status, results html).
+        # Replaced as one tuple, so a poll from another thread sees a whole update.
+        self._latest: tuple[int, str, str | None, str] = (0, "", None, "")
+        use_updates = getattr(app, "use_updates", None)
+        if callable(use_updates):
+            use_updates(self.update)
         self.httpd = ThreadingHTTPServer(("127.0.0.1", port), _handler_for(self))
         self.port = self.httpd.server_address[1]
         self.url = f"http://127.0.0.1:{self.port}/?key={self.key}"
@@ -115,6 +133,7 @@ class LiveServer:
         body = "\n".join(
             [
                 *head,
+                f'<div id="stages">{self.stages_html()}</div>',
                 '<form id="controls" class="controls">',
                 controls_html(app.controls),
                 '<div class="actions">'
@@ -129,15 +148,34 @@ class LiveServer:
         )
         script = to_json_script("KEY", self.key) + CONTROLS_JS + _APP_JS
         return document(app.title, body, script, body_class="live").replace(
-            f"<style>{CSS}</style>", f"<style>{CSS}{CONTROLS_CSS}</style>"
+            f"<style>{CSS}</style>", f"<style>{CSS}{CONTROLS_CSS}{STAGES_CSS}</style>"
         )
+
+    def stages_html(self) -> str:
+        stages = getattr(self.app, "stages", None)
+        return stages_html(stages()) if callable(stages) else ""
 
     def footer_html(self) -> str:
         return "\n".join(section_html(s) for s in self.app.footer())
 
+    def update(self, status: str | None = None, page: Page | None = None) -> None:
+        """Called by the app during handle() to show progress (see App)."""
+        version, old_status, old_html, _ = self._latest
+        self._latest = (
+            version + 1,
+            old_status if status is None else str(status),
+            old_html if page is None else render_body(page),
+            self.stages_html(),  # the app may have moved on a stage too
+        )
+
+    def latest(self) -> dict:
+        version, status, html, stages = self._latest
+        return {"version": version, "status": status, "html": html, "stages": stages}
+
     def act(self, request: dict) -> dict:
         if not self._busy.acquire(blocking=False):
             return {"error": "Still working on the last request. Please wait for it to finish."}
+        self._latest = (0, "", None, "")
         try:
             try:
                 values = parse_values(self.app.controls, request.get("values") or {})
@@ -151,7 +189,12 @@ class LiveServer:
             except Exception as e:
                 traceback.print_exc()
                 reply = Reply(error=f"Something went wrong: {type(e).__name__}: {e}")
-            out: dict = {"footer": self.footer_html(), "error": reply.error, "status": reply.status}
+            out: dict = {
+                "footer": self.footer_html(),
+                "stages": self.stages_html(),
+                "error": reply.error,
+                "status": reply.status,
+            }
             if reply.page is not None:
                 out["html"] = render_body(reply.page)
             if reply.confirm is not None:
@@ -165,6 +208,7 @@ class LiveServer:
                 }
             return out
         finally:
+            self._latest = (0, "", None, "")
             self._busy.release()
 
 
@@ -217,6 +261,8 @@ def _handler_for(live: LiveServer) -> type[BaseHTTPRequestHandler]:
             # which this server never approves.
             if not secrets.compare_digest(self.headers.get("X-Botview-Key", ""), live.key):
                 return self._refuse(403, "Forbidden")
+            if self.path == "/api/progress":  # answered while an action runs
+                return self._send(200, "application/json", json.dumps(live.latest()).encode())
             if self.path != "/api/action":
                 return self._refuse(404, "Not found")
             length = int(self.headers.get("Content-Length") or 0)
@@ -245,6 +291,7 @@ const errorEl = document.getElementById('error');
 const confirmEl = document.getElementById('confirm');
 const resultsEl = document.getElementById('results');
 const footerEl = document.getElementById('footer');
+const stagesEl = document.getElementById('stages');
 
 function values() {
   const out = {};
@@ -265,8 +312,33 @@ async function act(action, data, keepConfirm) {
   if (!keepConfirm) confirmEl.hidden = true;
   busy(true);
   const started = Date.now();
-  const tick = () => {
-    statusEl.textContent = `Working… ${Math.round((Date.now() - started) / 1000)}s`;
+  let progress = '';
+  let shown = 0;
+  let polling = false;
+  let finished = false;  // a late poll must not draw over the final answer
+  const tick = async () => {
+    // What the bot says it is doing, with a seconds ticker so it visibly lives.
+    const seconds = `${Math.round((Date.now() - started) / 1000)}s`;
+    statusEl.textContent = progress ? `${progress} · ${seconds}` : `Working… ${seconds}`;
+    if (polling) return;
+    polling = true;
+    try {
+      const r = await fetch('/api/progress', {method: 'POST', headers: {'X-Botview-Key': KEY}});
+      if (r.ok && !finished) {
+        const latest = await r.json();
+        if (finished) return;
+        progress = latest.status || '';
+        if (latest.stages && stagesEl.innerHTML !== latest.stages) {
+          stagesEl.innerHTML = latest.stages;
+        }
+        if (latest.html && latest.version > shown) {
+          shown = latest.version;
+          resultsEl.innerHTML = latest.html;
+          busy(true);  // buttons in the new results wait until the bot is free
+        }
+      }
+    } catch (e) { /* the main request reports any real failure */ }
+    polling = false;
   };
   tick();
   const timer = setInterval(tick, 1000);
@@ -277,10 +349,14 @@ async function act(action, data, keepConfirm) {
       body: JSON.stringify({action, values: values(), data: data || {}}),
     });
     if (!response.ok) throw new Error(`the bot answered ${response.status}`);
-    show(await response.json());
+    const reply = await response.json();
+    finished = true;
+    show(reply);
   } catch (e) {
+    finished = true;
     show({error: `Could not reach the bot (${e.message}). Is it still running in the terminal?`});
   } finally {
+    finished = true;
     clearInterval(timer);
     busy(false);
   }
@@ -291,6 +367,7 @@ function show(reply) {
   if (reply.error) { errorEl.textContent = reply.error; errorEl.hidden = false; }
   if (reply.html !== undefined) resultsEl.innerHTML = reply.html;
   if (reply.footer !== undefined) footerEl.innerHTML = reply.footer;
+  if (reply.stages !== undefined) stagesEl.innerHTML = reply.stages;
   if (reply.confirm) {
     const c = reply.confirm;
     confirmEl.replaceChildren();

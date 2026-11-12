@@ -12,6 +12,7 @@ members = [
     "catalogbot",
     "dupebot",
     "expirybot",
+    "finops",
     "formbot",
     "tidybot",
 ]
@@ -98,18 +99,31 @@ source = { editable = "bots/dupebot" }
 dependencies = [
     { name = "anthropic" },
     { name = "botview" },
+    { name = "finops" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = ">=2.7,<3" },
     { name = "botview", editable = "packages/botview" },
+    { name = "finops", editable = "packages/finops" },
 ]
 
 [[package]]
 name = "expirybot"
 version = "0.1.0"
 source = { editable = "bots/expirybot" }
+
+[[package]]
+name = "finops"
+version = "0.1.0"
+source = { editable = "packages/finops" }
+dependencies = [
+    { name = "botview" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "botview", editable = "packages/botview" }]
 
 [[package]]
 name = "formbot"

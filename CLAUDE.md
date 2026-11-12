@@ -17,6 +17,7 @@ uv run --package dupebot dupebot <dir>
 uv run --package dupebot dupebot <dir> --analyze   # calls the API; key in .env (copy .env.example)
 uv run --package dupebot dupebot [<dir>] --ui      # browser app: folder, settings, scan, send, token/cost tally
 uv run --package formbot formbot <form.pdf|form.docx>
+uv run spend                               # spend dashboard across all bots (finops)
 uv run --package expirybot expirybot <dir>   # likewise catalogbot, tidybot (stubs for now)
 uv run pytest                              # all tests
 uv run pytest bots/formbot                 # one bot (or packages/botview)
@@ -25,6 +26,8 @@ uv run ruff check . && uv run ruff format .
 ```
 
 To add a bot, copy an existing bot's folder layout. It is picked up automatically through the `bots/*` glob. Add a bot's runtime dependencies to that bot's own `pyproject.toml`, not the root one. Code shared between bots lives in `packages/*` (also workspace members); a bot depends on a package by listing it in `dependencies` plus `[tool.uv.sources] <pkg> = { workspace = true }`. Otherwise, only move code into a shared package once two bots actually need it.
+
+**Spend tracking (`packages/finops`):** model prices (`pricing.py`, checked by hand; update `PRICES_CHECKED` with them) and the `spend` dashboard, which reads every bot's `llm_calls` log read-only. A bot that calls a model logs each call to its own append-only `llm_calls` table (see `dupebot/calllog.py`) and is listed in `finops/ledger.py` `SOURCES`.
 
 **Shared browser UI (`packages/botview`):** every bot shows results to the user in a local browser page built with botview, not as tables in the terminal. A bot describes the page as data (`Page`, `Section`, `Card`, `Table`, `Text`, `Badge`); botview renders a self-contained HTML file (no web requests), writes it as a new file, and opens it. Keep bot-specific content in the bot (e.g. `dupebot/view.py`) and keep botview generic. For interactive use, botview also runs a live app (`LiveServer`): a local page with settings controls (`Choice`, `Slider`) whose actions call the bot's `handle()`; see `dupebot/ui.py`. Anything that spends money goes through a `Confirm` step first.
 
@@ -40,7 +43,7 @@ No bot may edit or delete the user's existing files or documents. Bots may creat
 ### DupeBot
 Finds likely duplicate files and older versions so the user can decide what to delete. It works in three stages:
 1. **Cluster (deterministic Python):** group files that may be related by name and extension. Clustering stays within a single file type and only covers types with more than one file in the corpus. Every file extension is in scope. Implemented: `cleaning.py` cleans names for matching (keeping the original and recording what was stripped), `cluster.py` buckets by cleaned-name prefix and clusters by trigram Jaccard similarity in parallel, and `report.py` builds the JSON handed to the agent stages. Details are in the bot's README.
-2. **Analyze (agent):** within each cluster, suggest which files are older versions or convenience copies of other files.
+2. **Analyze (LLM call):** within each cluster, label which files are older versions or convenience copies of other files (`analyze.py`, one structured call per batch, no tools). Then **suggest (agent, `suggest.py`):** a tool-using loop with read-only tools (`compare_files`, `list_folder`, both confined to the scan) picks the clean-ups worth attention, capped at min(25, 25% of clusters analysed); Python validates every suggestion before showing it.
 3. **Explain (agent):** present the findings so the user can choose what to delete. The bot itself has no delete capability.
 
 V1 sources: local files on the Mac and Google Drive.

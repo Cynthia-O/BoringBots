@@ -21,6 +21,13 @@ class Stream:
     def get_final_message(self):
         return self.message
 
+    @property
+    def text_stream(self):
+        """The answer's text in small pieces, as the API streams it."""
+        text = "".join(b.text for b in self.message.content if b.type == "text")
+        for i in range(0, len(text), 7):
+            yield text[i : i + 7]
+
 
 class Client:
     """Answers with every file in one unrelated group, reporting thinking tokens."""
@@ -42,7 +49,6 @@ class Client:
                             "files": [{"path": f["path"], "role": "member"} for f in c["files"]],
                             "reason": "r",
                             "relationship": "unrelated",
-                            "confidence": "low",
                             "check_before_deleting": "",
                         }
                     ],
@@ -149,7 +155,9 @@ def test_flags_preselect_controls(corpus):
 def test_folder_is_an_editable_field_starting_on_the_cli_folder(corpus):
     folder = DupeBotApp(corpus).controls[0]
     assert (folder.name, folder.default) == ("folder", str(corpus))
-    assert DupeBotApp().controls[0].default == ""
+    from dupebot.ui import DEFAULT_FOLDER
+
+    assert DupeBotApp().controls[0].default == DEFAULT_FOLDER  # typed in, ready to scan
 
 
 def test_scan_uses_the_folder_typed_in_the_page(tmp_path, corpus):
@@ -264,3 +272,126 @@ def test_reveal_reports_a_file_that_has_gone(corpus, DEFAULTS, opened):
         f.unlink()  # the test's own temporary files
     assert "No longer there" in app.handle("reveal", DEFAULTS, dict(button.data)).error
     assert opened == []
+
+
+# --- the suggestions agent, end to end through the app ---
+
+
+class AgentClient(Client):
+    """Analysis flags the v2 file as an earlier version; the agent then compares
+    the two files and suggests deleting v2."""
+
+    def __init__(self):
+        super().__init__()
+        self.agent_turns = 0
+
+    def _stream(self, **request):
+        self.requests.append(request)
+        usage = SimpleNamespace(
+            input_tokens=500,
+            output_tokens=100,
+            output_tokens_details=SimpleNamespace(thinking_tokens=40),
+        )
+        if "tools" not in request:  # the analysis call
+            [cluster] = json.loads(request["messages"][0]["content"])["clusters"]
+            files = [
+                {
+                    "path": f["path"],
+                    "role": "earlier_version" if "v2" in f["path"] else "current_version",
+                }
+                for f in cluster["files"]
+            ]
+            answer = {
+                "clusters": [
+                    {
+                        "cluster_id": cluster["cluster_id"],
+                        "groups": [
+                            {
+                                "files": files,
+                                "reason": "v2 then FINAL",
+                                "relationship": "version_series",
+                                "check_before_deleting": "",
+                            }
+                        ],
+                    }
+                ]
+            }
+            content = [SimpleNamespace(type="text", text=json.dumps(answer))]
+            return Stream(SimpleNamespace(stop_reason="end_turn", usage=usage, content=content))
+        self.agent_turns += 1
+        if self.agent_turns == 1:
+            call = SimpleNamespace(
+                type="tool_use",
+                id="t1",
+                name="compare_files",
+                input={"path_a": "Budget Review_v2.docx", "path_b": "FINAL_Budget Review.docx"},
+            )
+            return Stream(SimpleNamespace(stop_reason="tool_use", usage=usage, content=[call]))
+        cid = json.loads(self.requests[1]["messages"][0]["content"])["clusters"][0]["cluster_id"]
+        final = {
+            "suggestions": [
+                {
+                    "cluster_id": cid,
+                    "delete": "Budget Review_v2.docx",
+                    "keep": "FINAL_Budget Review.docx",
+                    "reason": "Same bytes.",
+                }
+            ],
+            "summary": "One exact copy.",
+        }
+        content = [SimpleNamespace(type="text", text=json.dumps(final))]
+        return Stream(SimpleNamespace(stop_reason="end_turn", usage=usage, content=content))
+
+
+def test_send_streams_clusters_then_agent_progress_then_reorders(corpus, DEFAULTS):
+    from botview import render
+
+    app = DupeBotApp(client=AgentClient())
+    assert [s.state for s in app.stages()] == ["todo", "todo", "todo"]
+    updates, stages_seen = [], []
+
+    def record(status=None, page=None):
+        updates.append((status, page))
+        stages_seen.append(tuple(s.state for s in app.stages()))
+
+    app.use_updates(record)
+    scanned = app.handle("run", DEFAULTS, {})
+    assert [s.state for s in app.stages()] == ["done", "todo", "todo"]
+    reply = app.handle("send", DEFAULTS, dict(scanned.confirm.data))
+
+    # The stages advance in order: analysis in progress, then the agent, then all done.
+    assert stages_seen[0] == ("done", "active", "todo")
+    assert ("done", "done", "active") in stages_seen
+    assert [s.state for s in app.stages()] == ["done", "done", "done"]
+    assert "One exact copy." in app.stages()[2].detail
+
+    pages = [render(page) for _, page in updates if page is not None]
+    statuses = [status for status, _ in updates if status]
+    # First every cluster waits, then answers fill in.
+    assert "waiting for the model" in pages[0]
+    assert any("Clusters answered</dt><dd>1 of 1" in html for html in pages)
+    assert any("Analysing: 1 of 1 clusters answered" in s for s in statuses)
+    # Then the agent reports its turns and checks.
+    assert any(s.startswith("Prioritization agent: turn 1") for s in statuses)
+    assert any(
+        "comparing Budget Review_v2.docx with FINAL_Budget Review.docx" in s for s in statuses
+    )
+
+    page = reply.page
+    html = render(page)
+    assert reply.error is None and page.title == "DupeBot results"
+    assert "priority 1" in html and "Suggested: delete Budget Review_v2.docx" in html
+    assert "identical contents (checked)" in html
+    assert "Prioritization agent:" not in html  # in the live app the stages say it instead
+    [saved] = (corpus.parent / "pages").glob("*dupebot-results*.html")
+    saved_html = saved.read_text()  # no stages on a saved copy, so it keeps the notices
+    assert "DupeBot itself never deletes" in saved_html and "One exact copy." in saved_html
+    assert "What the prioritization agent checked" in html
+    assert len(reveal_buttons(page)) == 4  # delete/keep in the pick, plus both files below it
+    # One analysis call plus two agent turns, all in this run's tally.
+    assert app.tally.last.calls == 3 and app.tally.last.thinking_tokens == 120
+
+
+def test_confirm_explains_what_the_agent_may_do(corpus, DEFAULTS):
+    text = DupeBotApp(client=Client()).handle("run", DEFAULTS, {}).confirm.text
+    assert "compare two files on this Mac" in text and "cannot change any file" in text

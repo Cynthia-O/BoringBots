@@ -1,0 +1,17 @@
+[project]
+name = "finops"
+version = "0.1.0"
+description = "Spend tracking for all BoringBots: model prices, and a dashboard of every bot's logged LLM calls."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["botview"]
+
+[tool.uv.sources]
+botview = { workspace = true }
+
+[project.scripts]
+spend = "finops.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

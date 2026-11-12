@@ -11,6 +11,8 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
+from botview.charts import CHART_CSS, CHART_JS, Chart, chart_html
+
 # Badge and row tones. Each has a colour in light and dark themes.
 TONES = ("neutral", "good", "info", "caution", "warning")
 
@@ -58,7 +60,7 @@ class Card:
     blocks: Sequence["Block"] = ()
 
 
-Block = Text | Table | Card
+Block = Text | Table | Card | Chart
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,7 @@ class Page:
     notices: Sequence[Text] = ()  # page-wide callouts, e.g. warnings
     sections: Sequence[Section] = field(default_factory=tuple)
     searchable: bool = True  # show a box that filters sections by their text
+    hero: tuple[str, str] | None = None  # (label, value): the one number the page leads with
 
 
 def render(page: Page) -> str:
@@ -94,7 +97,7 @@ def document(title: str, body: str, script: str = "", body_class: str = "") -> s
             f'<style>{CSS}</style></head><body class="{_e(body_class)}"><main>',
             body,
             "</main>",
-            f"<script>{FILTER_JS}{script}</script>",
+            f"<script>{FILTER_JS}{CHART_JS}{script}</script>",
             "</body></html>",
         ]
     )
@@ -106,6 +109,12 @@ def render_body(page: Page) -> str:
     parts = ['<div class="page-body">', f"<header><h1>{_e(page.title)}</h1>"]
     if page.subtitle:
         parts.append(f'<p class="subtitle">{_e(page.subtitle)}</p>')
+    if page.hero:
+        label, value = page.hero
+        parts.append(
+            f'<div class="hero"><div class="hero-label">{_e(label)}</div>'
+            f'<div class="hero-value">{_e(value)}</div></div>'
+        )
     if page.facts:
         parts.append(facts_html(page.facts))
     parts.append("</header>")
@@ -142,6 +151,8 @@ def _block(block: Block) -> str:
         return _text(block)
     if isinstance(block, Table):
         return _table(block)
+    if isinstance(block, Chart):
+        return chart_html(block)
     if isinstance(block, Card):
         inner = "\n".join(_block(b) for b in block.blocks)
         return f'<div class="card"><h3>{_e(block.title)}{_badges(block.badges)}</h3>{inner}</div>'
@@ -163,12 +174,8 @@ def _table(table: Table) -> str:
 
     def cell(tag: str, i: int, value: object) -> str:
         if isinstance(value, Action):
-            payload = _e(json.dumps(dict(value.data)))
-            return (
-                f'<{tag} class="action-cell"><button type="button" class="cell-action" '
-                f'data-action="{_e(value.action)}" data-payload="{payload}" '
-                f'title="{_e(value.title)}">{_e(value.label)}</button></{tag}>'
-            )
+            return f'<{tag} class="action-cell">{_action(value)}</{tag}>'
+
         cls = ' class="num"' if i in table.numeric else ""
         return f"<{tag}{cls}>{_e('' if value is None else str(value))}</{tag}>"
 
@@ -181,6 +188,14 @@ def _table(table: Table) -> str:
     return (
         f'<div class="table-wrap"><table><thead><tr>{head}</tr></thead>'
         f"<tbody>{''.join(rows)}</tbody></table></div>"
+    )
+
+
+def _action(action: Action) -> str:
+    payload = _e(json.dumps(dict(action.data)))
+    return (
+        f'<button type="button" class="cell-action" data-action="{_e(action.action)}" '
+        f'data-payload="{payload}" title="{_e(action.title)}">{_e(action.label)}</button>'
     )
 
 
@@ -200,7 +215,8 @@ def _e(text: str) -> str:
     return html.escape(text, quote=True)
 
 
-CSS = """
+CSS = (
+    """
 :root {
   --bg: #f7f7f5; --surface: #ffffff; --text: #1d1d1f; --muted: #6b6b70; --border: #e2e2e0;
   --neutral-bg: #ececea; --neutral-fg: #3a3a3c;
@@ -276,7 +292,27 @@ tr.row-warning td { background: var(--warning-bg); }
 tr.row-neutral td { color: var(--muted); }
 .filter { width: 100%; padding: 10px 12px; margin: 0 0 16px; font: inherit; color: var(--text);
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+
+:root {
+  --chart-surface: #fcfcfb; --chart-grid: #e1e0d9; --chart-axis: #c3c2b7; --chart-muted: #898781;
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --chart-surface: #1a1a19; --chart-grid: #2c2c2a; --chart-axis: #383835;
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+  }
+}
+:root[data-theme="dark"] {
+  --chart-surface: #1a1a19; --chart-grid: #2c2c2a; --chart-axis: #383835;
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+}
+.hero { margin: 8px 0 16px; }
+.hero-label { color: var(--muted); font-size: 13px; }
+.hero-value { font-size: 52px; font-weight: 700; line-height: 1.1; letter-spacing: -0.02em; }
 """
+    + CHART_CSS
+)
 
 FILTER_JS = """
 document.addEventListener('input', (event) => {

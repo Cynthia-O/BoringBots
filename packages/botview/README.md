@@ -10,7 +10,7 @@ page = Page(
     sections=[
         Section(
             "pdf-0001",
-            badges=[Badge("high confidence", "good")],
+            badges=[Badge("2 to consider deleting", "caution")],
             blocks=[
                 Card(
                     "Version series",
@@ -40,6 +40,8 @@ A bot can also run as a live app: a local page with settings controls that runs 
 - **Controls:** `Choice` (toggle buttons), `Slider` and `TextField` (one line of text; botview trims it and caps its length, and the app checks what it means). Each has a `default`, which is always marked, and an optional `selected` starting value. Values sent back by the page are checked against the controls before `handle` sees them.
 - **Buttons in tables:** an `Action` cell is a button that sends its action and data to `handle` (for example DupeBot's Show in Finder). Send ids the app issued, not paths, and check them in `handle`. Action buttons are hidden on saved pages.
 - **Replies:** `handle` returns a `Reply` with a `Page` to show, a `Confirm` (a question with a button that runs a further action, for anything that costs money), an `error` and/or a `status` line. `footer()` is redrawn after every action, which suits running tallies.
+- **Stages:** an app with a `stages()` method returning `Stage(title, detail, state)` items (state `todo`, `active` or `done`) gets a numbered row of them under its title, redrawn after every action and live update. Done stages are a saturated green, stages to come a pale green, and the active one is outlined.
+- **Live updates:** an app with a `use_updates(update)` method is given a function to call during a long `handle()`: `update(status=..., page=...)`. The page polls once a second, shows the status line (with a seconds ticker) and redraws the results area whenever a new page arrives, for example to fill in results as they stream in.
 - **One action at a time:** a second click while the bot is working gets a "still working" message.
 - **Local only:** the server listens on 127.0.0.1 and requires a random per-session key (in the address for the page, in a header for actions), and refuses other host names. Other websites in the browser cannot drive it.
 - **Session:** the app lives until Ctrl+C. State kept on the app object, such as a tally, resets on the next start.

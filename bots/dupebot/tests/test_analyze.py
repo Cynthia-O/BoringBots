@@ -118,7 +118,6 @@ def answer_for(payload: str) -> str:
                             "files": [{"path": f["path"], "role": "member"} for f in c["files"]],
                             "reason": "names differ",
                             "relationship": "unrelated",
-                            "confidence": "high",
                             "check_before_deleting": "",
                         }
                     ],
@@ -316,7 +315,7 @@ def test_run_analysis_writes_a_results_page(monkeypatch, capsys, tmp_path):
     assert page.parent == tmp_path / "pages"  # next to the (test) call log
     html = page.read_text()
     assert "pdf-0001" in html and "FINAL_a_2023.pdf" in html and "Unrelated" in html
-    assert "pdf-0001: unrelated (1 files, high)" in capsys.readouterr().out
+    assert "pdf-0001: unrelated (1 files)" in capsys.readouterr().out
 
 
 def test_no_browser_still_writes_the_page(monkeypatch, tmp_path):
@@ -330,3 +329,35 @@ def test_no_browser_still_writes_the_page(monkeypatch, tmp_path):
     monkeypatch.setattr("dupebot.cli.open_in_browser", fail)
     assert run_analysis(full_report(), "m", confirmed=True, open_browser=False) == 0
     assert len(list((tmp_path / "pages").glob("*.html"))) == 1
+
+
+# --- streaming answers cluster by cluster ---
+
+
+def test_cluster_stream_hands_over_each_entry_once_when_complete():
+    import json as _json
+
+    from dupebot.analyze import ClusterStream
+
+    entries = [
+        {"cluster_id": "pdf-0001", "groups": [{"files": [{"path": 'odd "quoted" {name}.pdf'}]}]},
+        {"cluster_id": "pdf-0002", "groups": []},
+    ]
+    text = _json.dumps({"clusters": entries}, indent=1)
+    got = []
+    stream = ClusterStream(got.append)
+    for size in (1, 3, 5):  # any split of the text, even one character at a time
+        got.clear()
+        stream = ClusterStream(got.append)
+        for i in range(0, len(text), size):
+            stream.feed(text[i : i + size])
+        assert got == entries
+
+
+def test_cluster_stream_waits_for_an_unfinished_entry():
+    from dupebot.analyze import ClusterStream
+
+    got = []
+    stream = ClusterStream(got.append)
+    stream.feed('{"clusters": [{"cluster_id": "a", "groups": []}, {"cluster_id": "b", "gro')
+    assert [e["cluster_id"] for e in got] == ["a"]

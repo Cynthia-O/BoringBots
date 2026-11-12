@@ -1,11 +1,6 @@
 import pytest
 
-from dupebot.analyze import MODEL_CHOICES
-from dupebot.pricing import PRICES, call_cost, usd
-
-
-def test_every_menu_model_has_a_price():
-    assert {c.model for c in MODEL_CHOICES} <= set(PRICES)
+from finops.pricing import call_cost, usd
 
 
 def test_thinking_and_response_are_billed_at_the_output_rate():

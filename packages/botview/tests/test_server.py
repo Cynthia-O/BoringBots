@@ -130,3 +130,64 @@ def test_defaults_are_marked():
     assert 'class="toggle is-default"' in html  # "Small"
     assert 'data-default="0.6"' in html
     assert 'class="control textfield" data-default="/tmp/x"' in html
+
+
+def test_live_updates_are_polled_with_the_key(live):
+    from botview import Page
+
+    live.update(status="3 of 9 done", page=Page("Partial"))
+    status, body = request(live, "POST", "/api/progress", {})
+    latest = json.loads(body)
+    assert status == 200 and latest["status"] == "3 of 9 done" and "Partial" in latest["html"]
+    live.update(status="4 of 9 done")  # a status alone keeps the last page
+    later = json.loads(request(live, "POST", "/api/progress", {})[1])
+    assert later["version"] > latest["version"] and "Partial" in later["html"]
+    assert request(live, "POST", "/api/progress", {}, key=False)[0] == 403
+
+
+def test_apps_get_an_update_function():
+    class App(EchoApp):
+        def use_updates(self, update):
+            self.update = update
+
+    app = App()
+    server = LiveServer(app)
+    try:
+        assert app.update == server.update
+    finally:
+        server.httpd.server_close()
+
+
+def test_stages_render_under_the_title_and_in_every_reply():
+    from botview import Stage
+
+    class Staged(EchoApp):
+        def stages(self):
+            return [
+                Stage("Pick", "done it", "done"),
+                Stage("Run", "half way", "active"),
+                Stage("Review", "", "todo"),
+            ]
+
+    server = LiveServer(Staged())
+    server.start()
+    try:
+        page = request(server, "GET", f"/?key={server.key}")[1]
+        assert page.index('id="stages"') < page.index('id="controls"')
+        for cls in ("stage-done", "stage-active", "stage-todo"):
+            assert cls in page
+        reply = json.loads(
+            request(server, "POST", "/api/action", {"action": "run", "values": GOOD})[1]
+        )
+        assert "half way" in reply["stages"]
+        server.update(status="x")
+        assert "half way" in json.loads(request(server, "POST", "/api/progress", {})[1])["stages"]
+    finally:
+        server.stop()
+
+
+def test_bad_stage_states_are_rejected():
+    from botview import Stage
+
+    with pytest.raises(ValueError):
+        Stage("x", state="finished")
