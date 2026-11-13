@@ -6,7 +6,7 @@ to the full report entry for its size, dates and authors.
 
 from collections.abc import Callable, Sequence
 
-from botview import Action, Badge, Card, Page, Section, Table, Text
+from botview import Action, Badge, Block, Card, Page, Section, Table, Text
 from dupebot.analyze import (
     DELETION_CANDIDATE_ROLES,
     BatchResult,
@@ -48,6 +48,7 @@ def results_page(
     cost: str | None = None,
     warnings: Sequence[str] = (),
     live: bool = False,
+    timing: Sequence[Block] = (),
 ) -> Page:
     """The one results page, drawn again as a run progresses.
 
@@ -155,6 +156,8 @@ def results_page(
                 ],
             )
         )
+    if timing:
+        sections.append(Section("How long this took", [Badge("this request")], list(timing)))
     return Page(
         title="DupeBot results",
         subtitle="Likely copies and older versions, with the agent's picks first.",

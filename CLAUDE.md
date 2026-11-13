@@ -18,6 +18,7 @@ uv run --package dupebot dupebot <dir> --analyze   # calls the API; key in .env 
 uv run --package dupebot dupebot [<dir>] --ui      # browser app: folder, settings, scan, send, token/cost tally
 uv run --package formbot formbot <form.pdf|form.docx>
 uv run spend                               # spend dashboard across all bots (finops)
+uv run traces                              # request traces across all bots (bottrace)
 uv run --package expirybot expirybot <dir>   # likewise catalogbot, tidybot (stubs for now)
 uv run pytest                              # all tests
 uv run pytest bots/formbot                 # one bot (or packages/botview)
@@ -28,6 +29,8 @@ uv run ruff check . && uv run ruff format .
 To add a bot, copy an existing bot's folder layout. It is picked up automatically through the `bots/*` glob. Add a bot's runtime dependencies to that bot's own `pyproject.toml`, not the root one. Code shared between bots lives in `packages/*` (also workspace members); a bot depends on a package by listing it in `dependencies` plus `[tool.uv.sources] <pkg> = { workspace = true }`. Otherwise, only move code into a shared package once two bots actually need it.
 
 **Spend tracking (`packages/finops`):** model prices (`pricing.py`, checked by hand; update `PRICES_CHECKED` with them) and the `spend` dashboard, which reads every bot's `llm_calls` log read-only. A bot that calls a model logs each call to its own append-only `llm_calls` table (see `dupebot/calllog.py`) and is listed in `finops/ledger.py` `SOURCES`.
+
+**Tracing (`packages/bottrace`):** every human request (a browser click, a command run) is one trace of nested spans (stage, llm, turn, tool, wait) in the local `~/.boringbots/traces.sqlite`. Bots start a trace with `Tracer("Bot").trace(...)` and mark steps with `span(...)` or `@traced`, which do nothing outside a trace. Model calls should record tokens, cost and time to first token (see `dupebot.analyze.stream_and_log`); use the trace id as the call log's `run_id` so the two join.
 
 **Shared browser UI (`packages/botview`):** every bot shows results to the user in a local browser page built with botview, not as tables in the terminal. A bot describes the page as data (`Page`, `Section`, `Card`, `Table`, `Text`, `Badge`); botview renders a self-contained HTML file (no web requests), writes it as a new file, and opens it. Keep bot-specific content in the bot (e.g. `dupebot/view.py`) and keep botview generic. For interactive use, botview also runs a live app (`LiveServer`): a local page with settings controls (`Choice`, `Slider`) whose actions call the bot's `handle()`; see `dupebot/ui.py`. Anything that spends money goes through a `Confirm` step first.
 

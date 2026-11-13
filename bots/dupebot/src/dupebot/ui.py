@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
+from bottrace import Tracer, current_span, current_trace_id, finished_spans, timing_blocks
 from botview import (
     Action,
     Badge,
@@ -253,6 +254,7 @@ class DupeBotApp:
             ),
         ]
         self.tally = TokenTally()
+        self.tracer = Tracer("DupeBot")
         self._pending: dict[str, _Pending] = {}
         # Files this session's scans found, by an opaque id. "Show in Finder"
         # only accepts these ids, never a path sent by the page.
@@ -268,10 +270,17 @@ class DupeBotApp:
         return [self.tally.section(default_db_path())]
 
     def handle(self, action: str, values: dict, data: dict) -> Reply:
-        if action == "run":
-            return self._scan(values)
-        if action == "send":
-            return self._send(str(data.get("pending", "")))
+        if action in ("run", "send"):
+            # Each click is one traced request, from the click until the answer.
+            name = "scan" if action == "run" else "send to model"
+            with self.tracer.trace(name, trigger="browser app") as root:
+                if action == "run":
+                    reply = self._scan(values)
+                else:
+                    reply = self._send(str(data.get("pending", "")))
+                if reply.error:
+                    root.set(problem=reply.error)
+                return reply
         if action == "reveal":
             return self._reveal(str(data.get("file", "")))
         return Reply(error=f"Unknown action: {action}")
@@ -280,19 +289,17 @@ class DupeBotApp:
         threshold = round(float(values["threshold"]), 2)
         model = values["model"]
         effort = None if values["effort"] == MODEL_DEFAULT_EFFORT else values["effort"]
-        folder = str(values["folder"])
-        if not folder:
-            return Reply(error="Enter the folder to scan.")
-        root = Path(folder).expanduser()
-        if not root.is_absolute():
-            return Reply(error=f"Enter the full path of the folder, starting with / or ~: {folder}")
-        if not root.is_dir():
-            return Reply(error=f"Not a folder (or not readable): {root}")
+        root = self._scan_root(values)
+        if isinstance(root, Reply):
+            return root
         scan_result = scan(root)
         clusters = cluster_records(scan_result.records, threshold)
         report = build_report(root, scan_result, clusters, threshold)
         page = clusters_page(report, self._reveal_button)
         n_clusters, n_files = len(report["clusters"]), report["summary"]["files_in_clusters"]
+        current_span().set(
+            folder=str(root), threshold=threshold, clusters=n_clusters, files=n_files
+        )
         self._stage(
             1,
             "done",
@@ -326,6 +333,7 @@ class DupeBotApp:
             "files on this Mac (only the result is sent) and list folders inside the scanned "
             "folder (names, sizes and dates are sent). It cannot change any file."
         )
+        text += self._send_note()
         return Reply(
             page=page,
             confirm=Confirm(text, "Send to model", "send", {"pending": pending_id}),
@@ -335,6 +343,32 @@ class DupeBotApp:
     def use_updates(self, update) -> None:
         """botview hands over a function for showing progress during a long action."""
         self._update = update
+
+    # --- hooks a subclass can override ---
+
+    def _scan_root(self, values: dict) -> Path | Reply:
+        """The folder to scan, from the folder box, or a Reply explaining the problem."""
+        folder = str(values["folder"])
+        if not folder:
+            return Reply(error="Enter the folder to scan.")
+        root = Path(folder).expanduser()
+        if not root.is_absolute():
+            return Reply(error=f"Enter the full path of the folder, starting with / or ~: {folder}")
+        if not root.is_dir():
+            return Reply(error=f"Not a folder (or not readable): {root}")
+        return root
+
+    def _send_blocked(self) -> str | None:
+        """A reason not to send right now, or None."""
+        return None
+
+    def _reveal_blocked(self) -> str | None:
+        """A reason not to show a file in Finder right now, or None."""
+        return None
+
+    def _send_note(self) -> str:
+        """Extra text for the end of the send question."""
+        return ""
 
     def stages(self) -> list[Stage]:
         """The three stages of a round, shown at the top of the page."""
@@ -350,6 +384,9 @@ class DupeBotApp:
         pending = self._pending.pop(pending_id, None)
         if pending is None:
             return Reply(error="That scan is no longer current. Scan again, then send.")
+        blocked = self._send_blocked()
+        if blocked:
+            return Reply(error=blocked)
         report, model = pending.report, pending.model
         effort = describe_effort(pending.effort, model)
         total = len(report["clusters"])
@@ -360,6 +397,7 @@ class DupeBotApp:
             self._update(status=status, page=page)
 
         def arrived(entry: dict) -> None:
+            current_span().event("first_result_shown", once=True)
             answers[entry["cluster_id"]] = entry
             self._stage(
                 2,
@@ -376,7 +414,9 @@ class DupeBotApp:
         self._stage(2, "active", f"Sent {total} clusters. The model is thinking…")
         self._stage(3, "todo", AGENT_WAITING)
         show()
-        run_id = uuid.uuid4().hex
+        # The call log's run id is the trace id, so the two can be joined.
+        run_id = current_trace_id() or uuid.uuid4().hex
+        current_span().set(model=model, effort=effort, clusters=total)
         log = CallLog()
         results = suggestions = problem = None
         try:
@@ -391,6 +431,7 @@ class DupeBotApp:
                 on_cluster=arrived,
             )
             answers = {c["cluster_id"]: c for r in results for c in r.clusters}  # checked
+            current_span().event("analysis_done")
             self._stage(2, "done", f"All {total} clusters answered.")
             agent_progress("starting…")
             suggestions = suggest(
@@ -421,7 +462,13 @@ class DupeBotApp:
         warnings = [w for r in results for w in r.warnings]
         if suggestions is not None:
             warnings += suggestions.warnings
-        common = dict(suggestions=suggestions, cost=usd(run_cost.cost.total), warnings=warnings)
+        spans, elapsed = finished_spans()
+        common = dict(
+            suggestions=suggestions,
+            cost=usd(run_cost.cost.total),
+            warnings=warnings,
+            timing=timing_blocks(spans, elapsed),
+        )
         page = results_page(
             report, answers, model, effort, self._reveal_button, live=True, **common
         )
@@ -465,6 +512,9 @@ class DupeBotApp:
         """Show a scanned file in a new Finder window, so several can be open side
         by side. Read-only: Finder opens a window on the file's folder with the
         file selected; nothing is changed."""
+        blocked = self._reveal_blocked()
+        if blocked:
+            return Reply(error=blocked)
         path = self._files.get(file_id)
         if path is None:
             return Reply(error="That file is not from a scan in this session. Scan again.")

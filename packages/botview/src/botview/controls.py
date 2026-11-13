@@ -59,6 +59,8 @@ class TextField:
     placeholder: str = ""
     help: str = ""
     max_length: int = 1000
+    # Shown but not editable; the server ignores what the page sends and uses default.
+    locked: bool = False
 
 
 Control = Choice | Slider | TextField
@@ -84,6 +86,8 @@ def parse_values(controls: Sequence[Control], raw: Mapping[str, object]) -> dict
             if value not in [o.value for o in c.options]:
                 raise ValueError(f"{c.label}: not one of the options: {value!r}")
             values[c.name] = value
+        elif isinstance(c, TextField) and c.locked:
+            values[c.name] = c.default  # never taken from the page
         elif isinstance(c, TextField):
             if not isinstance(value, str):
                 raise ValueError(f"{c.label}: missing")
@@ -138,6 +142,14 @@ def _slider(c: Slider) -> str:
 
 
 def _text_field(c: TextField) -> str:
+    if c.locked:
+        return (
+            f'<fieldset class="control textfield locked">'
+            f'<legend><label for="field-{_e(c.name)}">{_e(c.label)}</label></legend>'
+            f'<div class="slider-row"><input type="text" id="field-{_e(c.name)}" '
+            f'name="{_e(c.name)}" value="{_e(c.default)}" readonly aria-readonly="true">'
+            f'<span class="fixed-tag">fixed</span></div>{_help(c.help)}</fieldset>'
+        )
     value = c.default if c.selected is None else c.selected
     return (
         f'<fieldset class="control textfield" data-default="{_e(c.default)}">'
@@ -186,6 +198,10 @@ CONTROLS_CSS = """
   background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; }
 .textfield.at-default input[type=text] { border-style: dashed; border-color: var(--info-fg); }
+.textfield.locked input[type=text] { color: var(--muted); background: var(--surface);
+  cursor: default; }
+.fixed-tag { font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: 999px;
+  background: var(--neutral-bg); color: var(--neutral-fg); }
 button { font: inherit; border-radius: 8px; border: 1px solid var(--border); padding: 6px 12px;
   background: var(--bg); color: var(--text); cursor: pointer; }
 button.primary { background: var(--info-fg); color: var(--surface); border-color: var(--info-fg);
@@ -214,7 +230,7 @@ for (const field of document.querySelectorAll('.slider')) {
   field.querySelector('.reset').addEventListener('click', () => { input.value = dflt; sync(); });
   sync();
 }
-for (const field of document.querySelectorAll('.textfield')) {
+for (const field of document.querySelectorAll('.textfield:not(.locked)')) {
   const input = field.querySelector('input');
   const dflt = field.dataset.default;
   const sync = () => field.classList.toggle('at-default', input.value.trim() === dflt);

@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from itertools import repeat
 from pathlib import Path
 
+from bottrace import current_span, traced
 from dupebot.cleaning import CleanedName, clean_name, exclusion_reason
 
 # Files below these sizes are not clustered. Images get a higher floor: photos and
@@ -71,6 +72,7 @@ def min_size_for(path: Path) -> int:
     return MIN_SIZE_OTHER_BYTES
 
 
+@traced("walk folder", kind="stage")
 def scan(root: Path, min_size: int | None = None) -> ScanResult:
     """Find candidate files under root, recording why the others were skipped.
 
@@ -98,6 +100,10 @@ def scan(root: Path, min_size: int | None = None) -> ScanResult:
                 result.skipped[reason].append(path)
             else:
                 result.records.append(FileRecord(path, info.st_size, info.st_mtime, name))
+    current_span().set(
+        candidates=len(result.records),
+        skipped=sum(len(paths) for paths in result.skipped.values()),
+    )
     return result
 
 
@@ -179,6 +185,7 @@ def worker_count() -> int:
     return max(1, count - 1)
 
 
+@traced("cluster names", kind="stage")
 def cluster_records(
     records: Iterable[FileRecord],
     threshold: float = DEFAULT_THRESHOLD,
@@ -200,7 +207,13 @@ def cluster_records(
 
     workers = worker_count() if workers is None else workers
     comparisons = sum(len(n) * (len(n) - 1) // 2 for n in names)
-    if workers > 1 and len(jobs) > 1 and comparisons >= PARALLEL_MIN_COMPARISONS:
+    parallel = workers > 1 and len(jobs) > 1 and comparisons >= PARALLEL_MIN_COMPARISONS
+    current_span().set(
+        buckets=len(jobs),
+        comparisons=comparisons,
+        processes=min(workers, len(jobs)) if parallel else 1,
+    )
+    if parallel:
         with ProcessPoolExecutor(max_workers=min(workers, len(jobs))) as pool:
             results = list(pool.map(cluster_names, names, repeat(threshold)))
     else:
@@ -212,4 +225,5 @@ def cluster_records(
             files = sorted((bucket[i] for i in group), key=lambda r: (r.modified, str(r.path)))
             clusters.append(Cluster(ext, tuple(files)))
     clusters.sort(key=lambda c: (c.extension, c.files[0].name.cleaned, str(c.files[0].path)))
+    current_span().set(clusters=len(clusters))
     return clusters

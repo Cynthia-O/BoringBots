@@ -1,0 +1,17 @@
+[project]
+name = "bottrace"
+version = "0.1.0"
+description = "Tracing for all BoringBots: what each request did, how long each step took, and what it cost."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["botview"]
+
+[tool.uv.sources]
+botview = { workspace = true }
+
+[project.scripts]
+traces = "bottrace.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

@@ -21,12 +21,12 @@ class Stream:
     def get_final_message(self):
         return self.message
 
-    @property
-    def text_stream(self):
-        """The answer's text in small pieces, as the API streams it."""
+    def __iter__(self):
+        """Events as the API streams them: a start, then the text in small pieces."""
+        yield SimpleNamespace(type="message_start")
         text = "".join(b.text for b in self.message.content if b.type == "text")
         for i in range(0, len(text), 7):
-            yield text[i : i + 7]
+            yield SimpleNamespace(type="text", text=text[i : i + 7])
 
 
 class Client:
@@ -395,3 +395,39 @@ def test_send_streams_clusters_then_agent_progress_then_reorders(corpus, DEFAULT
 def test_confirm_explains_what_the_agent_may_do(corpus, DEFAULTS):
     text = DupeBotApp(client=Client()).handle("run", DEFAULTS, {}).confirm.text
     assert "compare two files on this Mac" in text and "cannot change any file" in text
+
+
+# --- tracing ---
+
+
+def test_send_is_traced_step_by_step(corpus, DEFAULTS, tmp_path):
+    from bottrace import read_traces, summarize
+    from dupebot.calllog import CallLog
+
+    app = DupeBotApp(client=AgentClient())
+    reply = app.handle("send", DEFAULTS, dict(app.handle("run", DEFAULTS, {}).confirm.data))
+    send, scan_trace = read_traces()  # newest first
+    names = [s["name"] for s in send]
+    for expected in (
+        "send to model",
+        "analyze",
+        "analyze call",
+        "prioritize",
+        "turn 1",
+        "compare_files",
+        "turn 2",
+        "suggest call",
+    ):
+        assert expected in names
+    assert {"walk folder", "cluster names", "build report"} <= {s["name"] for s in scan_trace}
+    s = summarize(send)
+    assert (s.llm_calls, s.turns, s.tool_calls) == (3, 2, 1)
+    assert s.thinking_tokens == 120 and s.cost_usd > 0
+    assert len(s.first_token_ms) == 3
+    assert [m[0] for m in s.milestones] == ["first_result_shown", "analysis_done"]
+    # The call log's rows share the trace's id, so the two can be joined.
+    with CallLog() as log:
+        assert {r["run_id"] for r in log.rows()} == {send[0]["trace_id"]}
+    from botview import render
+
+    assert "How long this took" in render(reply.page)

@@ -87,6 +87,13 @@ class Stream:
     def get_final_message(self):
         return self.message
 
+    def __iter__(self):
+        """Events as the API streams them: a start, then the text in small pieces."""
+        yield SimpleNamespace(type="message_start")
+        text = "".join(b.text for b in self.message.content if b.type == "text")
+        for i in range(0, len(text), 7):
+            yield SimpleNamespace(type="text", text=text[i : i + 7])
+
 
 class Scripted:
     def __init__(self, *turns):

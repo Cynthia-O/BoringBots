@@ -55,6 +55,18 @@ uv run spend
 
 This opens a dashboard with your total estimated spend, charts of spend per day, cumulative spend and tokens per day, and a day-by-day table. It only reads the bots' call logs, and each run writes a new page under `~/.boringbots/dashboards/`. The dollar figures are estimates based on the prices in `packages/finops/src/finops/pricing.py`; your Claude Console invoice is the final word.
 
+## Traces
+To see what each request did, step by step, and how long each step took:
+
+```sh
+uv run traces
+```
+
+Each click in a bot's browser app, or run of a command, is one trace: a timeline of its steps (model calls, agent turns, tool calls), where the time went, and tokens and estimated cost per step. Traces stay in a local file, `~/.boringbots/traces.sqlite`.
+
+## Share
+To share with a remote user, visit the SHARE_README.md in packages/botview.
+
 ## [DupeBot](bots/dupebot/)
 DupeBot helps you clear out clutter by finding files on your Mac and in Google Drive that are likely duplicates, older versions or convenience copies of one another. It groups candidate files by name and file type, then explains what it found so you can decide what to delete. It never deletes anything itself, so that decision always stays with you.
 

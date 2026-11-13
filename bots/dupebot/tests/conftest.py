@@ -7,3 +7,6 @@ def isolate_from_real_settings(monkeypatch, tmp_path):
     monkeypatch.setenv("DUPEBOT_DB", str(tmp_path / "calls.sqlite"))
     monkeypatch.setattr("dupebot.cli.load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setattr("dupebot.cli.open_in_browser", lambda path: True)  # no real browser
+    monkeypatch.setenv(
+        "BORINGBOTS_TRACES", str(tmp_path / "traces.sqlite")
+    )  # not the real trace file

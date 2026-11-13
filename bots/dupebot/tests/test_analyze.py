@@ -104,6 +104,13 @@ class FakeStream:
     def get_final_message(self):
         return self.message
 
+    def __iter__(self):
+        """Events as the API streams them: a start, then the text in small pieces."""
+        yield SimpleNamespace(type="message_start")
+        text = "".join(b.text for b in self.message.content if b.type == "text")
+        for i in range(0, len(text), 7):
+            yield SimpleNamespace(type="text", text=text[i : i + 7])
+
 
 def answer_for(payload: str) -> str:
     """A schema-shaped answer that puts each cluster's files in one unrelated group."""
@@ -304,8 +311,10 @@ def test_unknown_effort_is_rejected_before_any_call():
 def test_run_analysis_writes_a_results_page(monkeypatch, capsys, tmp_path):
     report = full_report()
 
-    def fake_analyze(report, model, log, effort):
-        return analyze(report, model=model, client=FakeClient(), log=log, effort=effort)
+    def fake_analyze(report, model, log, effort, run_id=None):
+        return analyze(
+            report, model=model, client=FakeClient(), log=log, effort=effort, run_id=run_id
+        )
 
     opened = []
     monkeypatch.setattr("dupebot.cli.analyze", fake_analyze)
@@ -319,8 +328,10 @@ def test_run_analysis_writes_a_results_page(monkeypatch, capsys, tmp_path):
 
 
 def test_no_browser_still_writes_the_page(monkeypatch, tmp_path):
-    def fake_analyze(report, model, log, effort):
-        return analyze(report, model=model, client=FakeClient(), log=log, effort=effort)
+    def fake_analyze(report, model, log, effort, run_id=None):
+        return analyze(
+            report, model=model, client=FakeClient(), log=log, effort=effort, run_id=run_id
+        )
 
     def fail(path):
         raise AssertionError("must not open a browser")

@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from botview.charts import CHART_CSS, CHART_JS, Chart, chart_html
+from botview.waterfall import WATERFALL_CSS, Waterfall, waterfall_html
 
 # Badge and row tones. Each has a colour in light and dark themes.
 TONES = ("neutral", "good", "info", "caution", "warning")
@@ -60,7 +61,7 @@ class Card:
     blocks: Sequence["Block"] = ()
 
 
-Block = Text | Table | Card | Chart
+Block = Text | Table | Card | Chart | Waterfall
 
 
 @dataclass(frozen=True)
@@ -151,6 +152,8 @@ def _block(block: Block) -> str:
         return _text(block)
     if isinstance(block, Table):
         return _table(block)
+    if isinstance(block, Waterfall):
+        return waterfall_html(block)
     if isinstance(block, Chart):
         return chart_html(block)
     if isinstance(block, Card):
@@ -312,6 +315,7 @@ tr.row-neutral td { color: var(--muted); }
 .hero-value { font-size: 52px; font-weight: 700; line-height: 1.1; letter-spacing: -0.02em; }
 """
     + CHART_CSS
+    + WATERFALL_CSS
 )
 
 FILTER_JS = """

@@ -22,7 +22,9 @@ from pathlib import Path
 
 import anthropic
 
+from bottrace import span
 from dupebot.calllog import CallLog, CallRecord
+from finops.pricing import call_cost
 
 DEFAULT_MODEL = "claude-haiku-5-5"
 # Whole clusters are packed into one request up to this many files. A cluster
@@ -234,67 +236,72 @@ def analyze(
     results = []
     batches = batch_clusters(analysis_input(report)["clusters"])
     total = sum(len(b) for b in batches)
-    done = 0
-    for number, batch in enumerate(batches, 1):
-        payload = json.dumps({"clusters": batch}, ensure_ascii=False)
-        where = f" (request {number} of {len(batches)})" if len(batches) > 1 else ""
-        answered = done
+    with span("analyze", kind="stage", clusters=total, requests=len(batches)):
+        done = 0
+        for number, batch in enumerate(batches, 1):
+            payload = json.dumps({"clusters": batch}, ensure_ascii=False)
+            where = f" (request {number} of {len(batches)})" if len(batches) > 1 else ""
+            answered = done
 
-        def arrived(entry: dict, where: str = where) -> None:
-            nonlocal answered
-            answered += 1
-            if on_cluster:
-                on_cluster(entry)
+            def arrived(entry: dict, where: str = where) -> None:
+                nonlocal answered
+                answered += 1
+                if on_cluster:
+                    on_cluster(entry)
+                if progress:
+                    progress(f"Analysing: {answered} of {total} clusters answered{where}")
+
+            stream = ClusterStream(arrived) if (progress or on_cluster) else None
             if progress:
-                progress(f"Analysing: {answered} of {total} clusters answered{where}")
-
-        stream = ClusterStream(arrived) if (progress or on_cluster) else None
-        if progress:
-            progress(f"Sent {done + len(batch)} of {total} clusters{where}. The model is thinking…")
-        call = {
-            "run_id": run_id,
-            "called_at": datetime.now(UTC).isoformat(timespec="seconds"),
-            "purpose": "analyze",
-            "model": model,
-            "effort": effort,
-            "prompt_sha": prompt_sha,
-            "input_chars": len(prompt) + len(payload),
-        }
-        message, text, thinking_tokens = stream_and_log(
-            client,
-            log,
-            call,
-            model=model,
-            max_tokens=MAX_OUTPUT_TOKENS,
-            system=prompt,
-            messages=[{"role": "user", "content": payload}],
-            output_config=output_config,
-            on_text=stream.feed if stream else None,
-        )
-        if message.stop_reason == "refusal":
-            raise AnalysisError("the model declined to analyse this batch")
-        if message.stop_reason == "max_tokens":
-            raise AnalysisError(
-                f"the answer was cut off at {MAX_OUTPUT_TOKENS} tokens; try fewer files per request"
+                progress(
+                    f"Sent {done + len(batch)} of {total} clusters{where}. The model is thinking…"
+                )
+            call = {
+                "run_id": run_id,
+                "called_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                "purpose": "analyze",
+                "model": model,
+                "effort": effort,
+                "prompt_sha": prompt_sha,
+                "input_chars": len(prompt) + len(payload),
+            }
+            message, text, thinking_tokens = stream_and_log(
+                client,
+                log,
+                call,
+                model=model,
+                max_tokens=MAX_OUTPUT_TOKENS,
+                system=prompt,
+                messages=[{"role": "user", "content": payload}],
+                output_config=output_config,
+                on_text=stream.feed if stream else None,
+                span_attrs={"request": number, "clusters": len(batch)},
             )
-        try:
-            answer = json.loads(text)["clusters"]
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
-            raise AnalysisError(f"the answer was not in the expected format ({e})") from None
-        results.append(
-            BatchResult(
-                cluster_ids=tuple(c["cluster_id"] for c in batch),
-                clusters=answer,
-                warnings=check_answer(batch, answer),
-                input_tokens=message.usage.input_tokens,
-                output_tokens=message.usage.output_tokens,
-                thinking_tokens=thinking_tokens,
+            if message.stop_reason == "refusal":
+                raise AnalysisError("the model declined to analyse this batch")
+            if message.stop_reason == "max_tokens":
+                raise AnalysisError(
+                    f"the answer was cut off at {MAX_OUTPUT_TOKENS} tokens; "
+                    "try fewer files per request"
+                )
+            try:
+                answer = json.loads(text)["clusters"]
+            except (json.JSONDecodeError, KeyError, TypeError) as e:
+                raise AnalysisError(f"the answer was not in the expected format ({e})") from None
+            results.append(
+                BatchResult(
+                    cluster_ids=tuple(c["cluster_id"] for c in batch),
+                    clusters=answer,
+                    warnings=check_answer(batch, answer),
+                    input_tokens=message.usage.input_tokens,
+                    output_tokens=message.usage.output_tokens,
+                    thinking_tokens=thinking_tokens,
+                )
             )
-        )
-        done += len(batch)
-        if progress:
-            progress(f"{done} of {total} clusters analysed and logged.")
-    return results
+            done += len(batch)
+            if progress:
+                progress(f"{done} of {total} clusters analysed and logged.")
+        return results
 
 
 def stream_and_log(
@@ -302,24 +309,62 @@ def stream_and_log(
     log: CallLog | None,
     call: dict,
     on_text: Callable[[str], None] | None = None,
+    span_attrs: dict | None = None,
     **request,
 ):
-    """Make one streamed model call and log it, failed or not.
+    """Make one streamed model call, log it and trace it, failed or not.
 
     call holds the log fields known before the call (run_id, purpose, model, ...).
     on_text, if given, receives the answer's visible text piece by piece as it
     streams in (thinking is not included).
     Returns the final message, its visible text, and its thinking token count
     (None when the API does not report it). Shared by every DupeBot model call so
-    each one is logged and counted the same way.
+    each one is logged, counted and traced the same way. span_attrs are extra
+    attributes for the call's trace span (e.g. which batch or turn).
     """
+    with span(f"{call['purpose']} call", kind="llm", **(span_attrs or {})) as s:
+        s.set(
+            purpose=call["purpose"],
+            model=call["model"],
+            effort=call.get("effort") or "model default",
+            prompt_sha=call["prompt_sha"],
+            input_chars=call["input_chars"],
+        )
+        message, text, thinking_tokens = _stream(client, log, call, on_text, s, request)
+        usage = message.usage
+        cost = call_cost(call["model"], usage.input_tokens, usage.output_tokens, thinking_tokens)
+        s.set(
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            thinking_tokens=thinking_tokens,
+            cache_read_tokens=getattr(usage, "cache_read_input_tokens", None),
+            cache_write_tokens=getattr(usage, "cache_creation_input_tokens", None),
+            cost_usd=cost.total if cost else None,
+            output_chars=len(text),
+            stop_reason=message.stop_reason,
+            response_model=getattr(message, "model", None),
+            request_id=getattr(message, "_request_id", None),
+        )
+    return message, text, thinking_tokens
+
+
+def _stream(client, log, call, on_text, s, request):
     started = time.monotonic()
     try:
-        # Streaming keeps long answers from hitting HTTP timeouts.
+        # Streaming keeps long answers from hitting HTTP timeouts. Reading the
+        # events one by one also times the first byte, thinking and text.
         with client.messages.stream(**request) as stream:
-            if on_text is not None:
-                for piece in stream.text_stream:
-                    on_text(piece)
+            for event in stream:
+                s.event("first_event", once=True)
+                kind = getattr(event, "type", None)
+                if kind == "content_block_start" and getattr(
+                    getattr(event, "content_block", None), "type", None
+                ) in ("thinking", "redacted_thinking"):
+                    s.event("first_thinking", once=True)
+                elif kind == "text":
+                    s.event("first_text", once=True)
+                    if on_text is not None:
+                        on_text(event.text)
             message = stream.get_final_message()
     except Exception as e:
         if log:

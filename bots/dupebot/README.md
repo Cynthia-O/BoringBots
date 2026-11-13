@@ -18,6 +18,8 @@ uv run dupebot ~/Desktop/ --output report.json
 uv run dupebot ~/Desktop/ --analyze       
 # open finops page (universal across all bots)
 uv run spend   
+# open traces page: step-by-step timelines of recent requests (universal across all bots)
+uv run traces
 ```
 
 Initial scope:
@@ -87,6 +89,9 @@ At the bottom, a tally shows tokens and estimated cost for input, output split i
 Every file row, on the clusters page and on the results page, has a **Show in Finder** button that opens the file's folder in a new Finder window with the file selected, so you can look at it or compare folders side by side before deciding anything. It is read-only. It works by asking Finder (via a short AppleScript) to open a window and select the file, so macOS asks once whether the app running DupeBot (e.g. Visual Studio Code or Terminal) may control Finder. If that is refused, DupeBot falls back to `open -R`, which needs no permission but may reuse one window, and says how to turn the permission on (System Settings > Privacy & Security > Automation). The button carries an id issued by this session's scan, never a path, and DupeBot only acts on ids it issued, for files that are still there. Files the model names that were not in the scan get no button. Saved copies of pages don't show the buttons, since there is no app behind them.
 
 The page is served only on this machine (127.0.0.1) and needs a random key minted for each session, so other websites open in your browser cannot drive it or start paid calls.
+
+### Tracing
+Each Scan or Send click in the browser app, and each command-line run, is traced with the shared `bottrace` package: walk folder, cluster names, build report, analyze (one span per model call), prioritize (one span per agent turn, holding its model call and tool calls), and, on the command line, the wait for your go-ahead. Model calls record tokens, cost, stop reason and time to first token, and milestones mark when the first cluster appeared and when the analysis finished. The results page ends with **How long this took**, the timeline of that request. `uv run traces` shows every recent request. The call log's `run_id` is the trace id, so calls and traces can be matched.
 
 ### LLM call log (`calllog.py`)
 Every LLM call, including failed ones, adds a row to the `llm_calls` table in `~/.dupebot/dupebot.sqlite` (override with `DUPEBOT_DB`), for FinOps and LLMOps tracking. The database lives outside the repo so nothing in it can be committed. Each row records the run, time (UTC), purpose, model requested and model that answered, thinking effort requested (empty means the model's default; set it with `--effort low|medium|high|xhigh|max`), a fingerprint of the system prompt, input and output characters, input and output tokens (and how many of the output tokens were thinking), duration, stop reason, any error, and the API request id. Rows are only ever added; when a newer DupeBot adds a column, older rows are kept with it empty.

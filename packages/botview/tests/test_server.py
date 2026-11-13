@@ -191,3 +191,13 @@ def test_bad_stage_states_are_rejected():
 
     with pytest.raises(ValueError):
         Stage("x", state="finished")
+
+
+def test_locked_text_fields_show_a_fixed_value_the_page_cannot_change():
+    from botview import TextField
+    from botview.controls import controls_html, parse_values
+
+    field = TextField("folder", "Folder", default="~/Demo", locked=True)
+    html = controls_html([field])
+    assert 'value="~/Demo" readonly' in html and "fixed" in html and "reset" not in html
+    assert parse_values([field], {"folder": "/etc"}) == {"folder": "~/Demo"}

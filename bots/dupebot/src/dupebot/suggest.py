@@ -29,6 +29,7 @@ from pathlib import Path
 
 import anthropic
 
+from bottrace import span
 from dupebot.analyze import (
     DEFAULT_MODEL,
     DELETION_CANDIDATE_ROLES,
@@ -325,73 +326,92 @@ def suggest(
     messages: list[dict] = [{"role": "user", "content": payload}]
     out = SuggestResult([], "", cap, candidates)
 
-    for turn in range(1, MAX_TURNS + 1):
-        last_turn = turn == MAX_TURNS
-        if progress:
-            checks = len(tools.checks)
-            progress(
-                f"turn {turn} of up to {MAX_TURNS}, "
-                + ("deciding what to check…" if turn == 1 else f"{checks} check(s) made so far…")
-                + (" Writing its answer." if last_turn else "")
-            )
-        call = {
-            "run_id": run_id,
-            "called_at": datetime.now(UTC).isoformat(timespec="seconds"),
-            "purpose": "suggest",
-            "model": model,
-            "effort": effort,
-            "prompt_sha": prompt_sha,
-            "input_chars": len(prompt) + sum(len(json.dumps(m, default=str)) for m in messages),
-        }
-        message, text, thinking = stream_and_log(
-            client,
-            log,
-            call,
-            model=model,
-            max_tokens=MAX_OUTPUT_TOKENS,
-            system=prompt,
-            messages=messages,
-            tools=TOOLS,
-            # On the last turn tools are off, so the agent has to answer.
-            tool_choice={"type": "none"} if last_turn else {"type": "auto"},
-            output_config=output_config,
-        )
-        out.calls += 1
-        out.input_tokens += message.usage.input_tokens
-        out.output_tokens += message.usage.output_tokens
-        if thinking is not None:
-            out.thinking_tokens = (out.thinking_tokens or 0) + thinking
-
-        if message.stop_reason == "refusal":
-            raise SuggestionError("the model declined to make suggestions")
-        if message.stop_reason == "max_tokens":
-            raise SuggestionError(f"the answer was cut off at {MAX_OUTPUT_TOKENS} tokens")
-        tool_calls = [b for b in message.content if b.type == "tool_use"]
-        if message.stop_reason == "tool_use" and tool_calls and not last_turn:
-            messages.append({"role": "assistant", "content": message.content})
-            results_block = []
-            for block in tool_calls:
+    with span("prioritize", kind="stage", cap=cap, candidates=candidates) as stage:
+        for turn in range(1, MAX_TURNS + 1):
+            with span(f"turn {turn}", kind="turn", turn=turn):
+                last_turn = turn == MAX_TURNS
                 if progress:
-                    progress(f"turn {turn} of up to {MAX_TURNS}, {_describe_call(block)}")
-                result, is_error = tools.run(block.name, block.input)
-                entry = {"type": "tool_result", "tool_use_id": block.id, "content": result}
-                if is_error:
-                    entry["is_error"] = True
-                results_block.append(entry)
-            messages.append({"role": "user", "content": results_block})  # all in one message
-            continue
-        try:
-            answer = json.loads(text)
-            raw, summary = answer["suggestions"], answer["summary"]
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
-            raise SuggestionError(f"the answer was not in the expected format ({e})") from None
-        out.suggestions, out.warnings = check_suggestions(raw, report, cap, tools)
-        out.summary = summary
-        out.checks = tools.checks
-        return out
-    raise SuggestionError(
-        f"no answer after {MAX_TURNS} turns"
-    )  # not reached: last turn has no tools
+                    checks = len(tools.checks)
+                    progress(
+                        f"turn {turn} of up to {MAX_TURNS}, "
+                        + (
+                            "deciding what to check…"
+                            if turn == 1
+                            else f"{checks} check(s) made so far…"
+                        )
+                        + (" Writing its answer." if last_turn else "")
+                    )
+                call = {
+                    "run_id": run_id,
+                    "called_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                    "purpose": "suggest",
+                    "model": model,
+                    "effort": effort,
+                    "prompt_sha": prompt_sha,
+                    "input_chars": len(prompt)
+                    + sum(len(json.dumps(m, default=str)) for m in messages),
+                }
+                message, text, thinking = stream_and_log(
+                    client,
+                    log,
+                    call,
+                    model=model,
+                    max_tokens=MAX_OUTPUT_TOKENS,
+                    system=prompt,
+                    messages=messages,
+                    tools=TOOLS,
+                    # On the last turn tools are off, so the agent has to answer.
+                    tool_choice={"type": "none"} if last_turn else {"type": "auto"},
+                    output_config=output_config,
+                )
+                out.calls += 1
+                out.input_tokens += message.usage.input_tokens
+                out.output_tokens += message.usage.output_tokens
+                if thinking is not None:
+                    out.thinking_tokens = (out.thinking_tokens or 0) + thinking
+
+                if message.stop_reason == "refusal":
+                    raise SuggestionError("the model declined to make suggestions")
+                if message.stop_reason == "max_tokens":
+                    raise SuggestionError(f"the answer was cut off at {MAX_OUTPUT_TOKENS} tokens")
+                tool_calls = [b for b in message.content if b.type == "tool_use"]
+                if message.stop_reason == "tool_use" and tool_calls and not last_turn:
+                    messages.append({"role": "assistant", "content": message.content})
+                    results_block = []
+                    for block in tool_calls:
+                        if progress:
+                            progress(f"turn {turn} of up to {MAX_TURNS}, {_describe_call(block)}")
+                        with span(block.name, kind="tool", target=_target(block)) as ts:
+                            result, is_error = tools.run(block.name, block.input)
+                            ts.set(outcome=tools.checks[-1].outcome, is_error=is_error)
+                        entry = {"type": "tool_result", "tool_use_id": block.id, "content": result}
+                        if is_error:
+                            entry["is_error"] = True
+                        results_block.append(entry)
+                    messages.append(
+                        {"role": "user", "content": results_block}
+                    )  # all in one message
+                    continue
+                try:
+                    answer = json.loads(text)
+                    raw, summary = answer["suggestions"], answer["summary"]
+                except (json.JSONDecodeError, KeyError, TypeError) as e:
+                    raise SuggestionError(
+                        f"the answer was not in the expected format ({e})"
+                    ) from None
+                out.suggestions, out.warnings = check_suggestions(raw, report, cap, tools)
+                out.summary = summary
+                out.checks = tools.checks
+                stage.set(
+                    turns=turn,
+                    picks=len(out.suggestions),
+                    checks=len(tools.checks),
+                    dropped=len(out.warnings),
+                )
+                return out
+        raise SuggestionError(
+            f"no answer after {MAX_TURNS} turns"
+        )  # not reached: last turn has no tools
 
 
 def check_suggestions(
@@ -437,6 +457,13 @@ def _agent_input(report: dict, results: list[BatchResult], cap: int) -> dict:
         if c["cluster_id"] in analysed
     ]
     return {"max_suggestions": cap, "clusters": clusters}
+
+
+def _target(block) -> str:
+    args = block.input if isinstance(block.input, dict) else {}
+    if block.name == "compare_files":
+        return f"{args.get('path_a', '?')} ↔ {args.get('path_b', '?')}"
+    return str(args.get("folder", "")) or "(scanned folder)"
 
 
 def _describe_call(block) -> str:

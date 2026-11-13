@@ -83,7 +83,11 @@ class App(Protocol):
 
 
 class LiveServer:
-    """Serves one App on 127.0.0.1. Use start() in tests, serve() for real."""
+    """Serves one App on 127.0.0.1. Use start() in tests, serve() for real.
+
+    Subclasses can extend who may connect: handler_base (the request handler
+    class), allowed_hosts() and act() are the extension points.
+    """
 
     def __init__(self, app: App, port: int = 0):
         self.app = app
@@ -95,16 +99,25 @@ class LiveServer:
         use_updates = getattr(app, "use_updates", None)
         if callable(use_updates):
             use_updates(self.update)
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", port), _handler_for(self))
+        handler = type("Handler", (self.handler_base,), {"live": self})
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)
         self.port = self.httpd.server_address[1]
         self.url = f"http://127.0.0.1:{self.port}/?key={self.key}"
+
+    @property
+    def handler_base(self) -> type["LiveHandler"]:
+        return LiveHandler
+
+    def allowed_hosts(self) -> set[str]:
+        return {f"127.0.0.1:{self.port}", f"localhost:{self.port}"}
 
     def start(self) -> threading.Thread:
         thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         thread.start()
         return thread
 
-    def serve(self, open_browser: bool = True) -> None:
+    def serve(self, open_browser: bool = True) -> bool:
+        """Run until Ctrl+C. Returns False if the server could not start."""
         print(f"{self.app.title} is running at {self.url}", file=sys.stderr)
         print("Press Ctrl+C here to stop it and end the session.", file=sys.stderr)
         if open_browser and not open_in_browser_url(self.url):
@@ -115,6 +128,7 @@ class LiveServer:
             print("\nSession ended.", file=sys.stderr)
         finally:
             self.httpd.server_close()
+        return True
 
     def stop(self) -> None:
         self.httpd.shutdown()
@@ -122,9 +136,13 @@ class LiveServer:
 
     # --- what the handler calls ---
 
-    def shell(self) -> str:
+    def shell(self, key: str | None = None, notice: str | None = None) -> str:
+        """The app's page. key: the key its requests must carry (the host's by
+        default). notice: an optional line shown under the title."""
         app = self.app
         head = [f'<header class="app-head"><h1>{_e(app.title)}</h1>']
+        if notice:
+            head.append(f'<p class="callout tone-info">{_e(notice)}</p>')
         if app.subtitle:
             head.append(f'<p class="subtitle">{_e(app.subtitle)}</p>')
         if app.facts:
@@ -146,7 +164,7 @@ class LiveServer:
                 f'<footer id="footer" class="app-footer">{self.footer_html()}</footer>',
             ]
         )
-        script = to_json_script("KEY", self.key) + CONTROLS_JS + _APP_JS
+        script = to_json_script("KEY", key or self.key) + CONTROLS_JS + _APP_JS
         return document(app.title, body, script, body_class="live").replace(
             f"<style>{CSS}</style>", f"<style>{CSS}{CONTROLS_CSS}{STAGES_CSS}</style>"
         )
@@ -172,7 +190,8 @@ class LiveServer:
         version, status, html, stages = self._latest
         return {"version": version, "status": status, "html": html, "stages": stages}
 
-    def act(self, request: dict) -> dict:
+    def act(self, request: dict, role: str = "host") -> dict:
+        """Run one action. role says who asked; this server only has the host."""
         if not self._busy.acquire(blocking=False):
             return {"error": "Still working on the last request. Please wait for it to finish."}
         self._latest = (0, "", None, "")
@@ -221,63 +240,91 @@ def open_in_browser_url(url: str) -> bool:
     return webbrowser.open(url)
 
 
-def _handler_for(live: LiveServer) -> type[BaseHTTPRequestHandler]:
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, format, *args):  # keep the terminal quiet
-            pass
+class LiveHandler(BaseHTTPRequestHandler):
+    """Requests to a LiveServer. `live` is set to the server for each instance.
+    Subclasses extend role(), respond_json(), other_get() and other_post()."""
 
-        def _refuse(self, code: int, text: str) -> None:
-            self._send(code, "text/plain; charset=utf-8", text.encode())
+    live: LiveServer
 
-        def _send(self, code: int, kind: str, body: bytes) -> None:
-            self.send_response(code)
-            self.send_header("Content-Type", kind)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
-            self.end_headers()
-            self.wfile.write(body)
+    def log_message(self, format, *args):  # keep the terminal quiet
+        pass
 
-        def _host_ok(self) -> bool:
-            # Refusing other host names blocks DNS-rebinding attacks.
-            return self.headers.get("Host") in (f"127.0.0.1:{live.port}", f"localhost:{live.port}")
+    def refuse(self, code: int, text: str) -> None:
+        self.send(code, "text/plain; charset=utf-8", text.encode())
 
-        def do_GET(self):
-            if not self._host_ok():
-                return self._refuse(403, "Forbidden")
-            parts = urlsplit(self.path)
-            if parts.path == "/favicon.ico":
-                return self._refuse(404, "Not found")
-            key = parse_qs(parts.query).get("key", [""])[0]
-            if parts.path != "/" or not secrets.compare_digest(key, live.key):
-                return self._refuse(403, "Open the address printed in the terminal.")
-            self._send(200, "text/html; charset=utf-8", live.shell().encode())
+    def send(self, code: int, kind: str, body: bytes, headers: dict | None = None) -> None:
+        self.send_response(code)
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        self.end_headers()
+        self.wfile.write(body)
 
-        def do_POST(self):
-            if not self._host_ok():
-                return self._refuse(403, "Forbidden")
-            # A custom header cannot be sent cross-site without a CORS preflight,
-            # which this server never approves.
-            if not secrets.compare_digest(self.headers.get("X-Botview-Key", ""), live.key):
-                return self._refuse(403, "Forbidden")
-            if self.path == "/api/progress":  # answered while an action runs
-                return self._send(200, "application/json", json.dumps(live.latest()).encode())
-            if self.path != "/api/action":
-                return self._refuse(404, "Not found")
-            length = int(self.headers.get("Content-Length") or 0)
-            if length > MAX_REQUEST_BYTES:
-                return self._refuse(413, "Too large")
-            try:
-                request = json.loads(self.rfile.read(length) or b"{}")
-                if not isinstance(request, dict):
-                    raise ValueError
-            except ValueError:
-                return self._refuse(400, "Bad request")
-            body = json.dumps(live.act(request)).encode()
-            self._send(200, "application/json", body)
+    def send_html(self, code: int, page: str, headers: dict | None = None) -> None:
+        self.send(code, "text/html; charset=utf-8", page.encode(), headers)
 
-    return Handler
+    def host_ok(self) -> bool:
+        # Refusing other host names blocks DNS-rebinding attacks.
+        return self.headers.get("Host") in self.live.allowed_hosts()
+
+    def role(self) -> str | None:
+        """Who sent this request, or None if it may not use the app.
+        A custom header cannot be sent cross-site without a CORS preflight,
+        which this server never approves."""
+        key = self.headers.get("X-Botview-Key", "")
+        return "host" if secrets.compare_digest(key, self.live.key) else None
+
+    def respond_json(self, data: dict, role: str) -> None:
+        text = json.dumps(data, ensure_ascii=False)
+        self.send(200, "application/json; charset=utf-8", text.encode())
+
+    def other_get(self, parts) -> bool:
+        """Handle a GET this class does not know. Returns True if handled."""
+        return False
+
+    def other_post(self) -> bool:
+        """Handle a POST before the key check. Returns True if handled."""
+        return False
+
+    def do_GET(self):
+        if not self.host_ok():
+            return self.refuse(403, "Forbidden")
+        parts = urlsplit(self.path)
+        if parts.path == "/favicon.ico":
+            return self.refuse(404, "Not found")
+        key = parse_qs(parts.query).get("key", [""])[0]
+        if parts.path == "/" and secrets.compare_digest(key, self.live.key):
+            return self.send_html(200, self.live.shell())
+        if self.other_get(parts):
+            return
+        return self.refuse(403, "Open the address printed in the terminal.")
+
+    def do_POST(self):
+        if not self.host_ok():
+            return self.refuse(403, "Forbidden")
+        if self.other_post():
+            return
+        role = self.role()
+        if role is None:
+            return self.refuse(403, "Forbidden")
+        if self.path == "/api/progress":  # answered while an action runs
+            return self.respond_json(self.live.latest(), role)
+        if self.path != "/api/action":
+            return self.refuse(404, "Not found")
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > MAX_REQUEST_BYTES:
+            return self.refuse(413, "Too large")
+        try:
+            request = json.loads(self.rfile.read(length) or b"{}")
+            if not isinstance(request, dict):
+                raise ValueError
+        except ValueError:
+            return self.refuse(400, "Bad request")
+        self.respond_json(self.live.act(request, role), role)
 
 
 def _e(text: str) -> str:

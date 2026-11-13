@@ -3,6 +3,7 @@
 from datetime import datetime
 from pathlib import Path
 
+from bottrace import traced
 from dupebot.cluster import (
     MAX_BUCKET_SIZE,
     MIN_SIZE_IMAGE_BYTES,
@@ -15,6 +16,7 @@ from dupebot.cluster import (
 from dupebot.metadata import read_authors
 
 
+@traced("build report", kind="stage")
 def build_report(
     root: Path,
     scan_result: ScanResult,

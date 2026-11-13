@@ -10,6 +10,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
+from bottrace import Tracer, current_trace_id, span
 from botview import LiveServer, open_in_browser, write_page
 from dupebot import apierrors
 from dupebot.analyze import (
@@ -112,6 +113,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     settings = ask_settings(args.threshold, args.model, args.effort, analyzing=args.analyze)
+    # One traced request per run, from after the settings questions until it ends.
+    with Tracer("DupeBot").trace(
+        "command line", folder=str(args.root), analyze=args.analyze, threshold=settings.threshold
+    ):
+        return _run(args, parser, settings)
+
+
+def _run(args, parser, settings) -> int:
     scan_result = scan(args.root)
     clusters = cluster_records(scan_result.records, settings.threshold)
     report = build_report(args.root, scan_result, clusters, settings.threshold)
@@ -176,10 +185,12 @@ def run_analysis(
             file=sys.stderr,
         )
         print("Send? [y/N]: ", end="", file=sys.stderr, flush=True)
-        try:
-            reply = ask().strip().lower()
-        except EOFError:
-            reply = ""
+        with span("waiting for your go-ahead", kind="wait") as wait:
+            try:
+                reply = ask().strip().lower()
+            except EOFError:
+                reply = ""
+            wait.set(answer=reply or "(none)")
         if reply not in ("y", "yes"):
             print("Not sent.", file=sys.stderr)
             return 1
@@ -187,7 +198,7 @@ def run_analysis(
     load_dotenv()  # before opening the log, so DUPEBOT_DB in .env takes effect
     log = CallLog()
     try:
-        results = analyze(report, model=model, log=log, effort=effort)
+        results = analyze(report, model=model, log=log, effort=effort, run_id=current_trace_id())
     except apierrors.EXPECTED as e:
         print(apierrors.describe(e, model), file=sys.stderr)
         return 1
