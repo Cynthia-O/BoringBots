@@ -38,13 +38,17 @@ def _threshold_arg(text: str) -> float:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="dupebot",
-        description="Find likely duplicate files. Reports only; never deletes.",
+        description="Find likely duplicate files. Reports only; never deletes. With no "
+        "other flags, opens DupeBot's browser app: choose the folder and settings, scan and "
+        "send from there, with a running token tally. Each window you open (the page's New "
+        "window link) runs separately. Stop it with Ctrl+C.",
     )
     parser.add_argument(
         "root",
         type=Path,
         nargs="?",
-        help="Directory to scan. Optional with --ui, where the folder can be typed in the page.",
+        help="Directory to scan. Optional for the browser app, where it can be typed in the "
+        "page; needed with --json, --output or --analyze.",
     )
     parser.add_argument(
         "--threshold",
@@ -54,37 +58,44 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--output",
         type=Path,
-        help="Write the JSON report to this new file instead of stdout. "
-        "Refuses to write over an existing file.",
+        help="Run in the terminal instead of the browser app, and write the JSON report to "
+        "this new file. Refuses to write over an existing file.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Run in the terminal instead of the browser app, and print the JSON report.",
     )
     parser.add_argument(
         "--analyze",
         action="store_true",
-        help="Send the clusters to the analyst model and show its analysis in your "
-        "browser instead of printing the JSON report. Needs ANTHROPIC_API_KEY (see "
+        help="Run in the terminal instead of the browser app: send the clusters to the "
+        "analyst model and open its analysis as a page. Needs ANTHROPIC_API_KEY (see "
         ".env.example). Asks first.",
     )
     parser.add_argument(
         "--model",
-        help=f"Model for --analyze (default {DEFAULT_MODEL}).",
+        help=f"Model (default {DEFAULT_MODEL}). In the browser app, preselects it.",
     )
     parser.add_argument(
         "--effort",
         choices=(MODEL_DEFAULT_EFFORT, *EFFORT_LEVELS),
-        help="Thinking effort for --analyze. Lower effort thinks less and uses fewer "
+        help="Thinking effort. Lower effort thinks less and uses fewer "
         f"output tokens. '{MODEL_DEFAULT_EFFORT}' (the default) leaves the model's own.",
     )
+    # The browser app is the default; --ui is still accepted from before that.
+    parser.add_argument("--ui", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
-        "--ui",
+        "--traces",
         action="store_true",
-        help="Run DupeBot from a page in your browser: choose settings, scan and send "
-        "from there, with a running token tally. Stop it with Ctrl+C.",
+        help="In the browser app, add a snapshot of recent traces (as `uv run traces` shows them, "
+        "across all windows and bots) to the foot of each window.",
     )
     parser.add_argument(
         "--no-browser",
         action="store_true",
-        help="With --analyze, save the results page but do not open it. With --ui, "
-        "print the page's address but do not open it.",
+        help="Do not open a browser: the browser app prints its address, and --analyze "
+        "saves its results page without opening it.",
     )
     parser.add_argument(
         "--yes",
@@ -92,24 +103,36 @@ def main(argv: list[str] | None = None) -> int:
         help="With --analyze, send without asking for confirmation.",
     )
     parser.epilog = (
-        "Settings not given as flags are shown before the run, with the option to keep "
-        "all the defaults or change them one by one."
+        "In the terminal, settings not given as flags are shown before the run, with the "
+        "option to keep all the defaults or change them one by one."
     )
     args = parser.parse_args(argv)
 
-    if args.root is None and not args.ui:
-        parser.error("give the directory to scan (or use --ui to choose it in the browser)")
+    in_terminal = bool(args.json or args.output or args.analyze)
     if args.root is not None and not args.root.is_dir():
         parser.error(f"not a directory: {args.root}")
-    if args.output and args.output.exists():
-        parser.error(f"will not write over an existing file: {args.output}")
-    if args.ui:
-        if args.output or args.analyze or args.yes:
-            parser.error("--ui cannot be combined with --output, --analyze or --yes")
+    if in_terminal:
+        if args.ui or args.traces:
+            parser.error("--json, --output and --analyze run in the terminal, not the browser app")
+        if args.root is None:
+            parser.error("give the directory to scan")
+        if args.json and args.output:
+            parser.error("choose --json or --output, not both")
+        if args.output and args.output.exists():
+            parser.error(f"will not write over an existing file: {args.output}")
+    if args.yes and not args.analyze:
+        parser.error("--yes works with --analyze")
+    if not in_terminal:
         load_dotenv()
         root = args.root.resolve() if args.root else None  # the page needs a full path
-        app = DupeBotApp(root, args.threshold, args.model, args.effort)
-        LiveServer(app).serve(open_browser=not args.no_browser)
+
+        # One DupeBot per browser window, so windows can run different experiments.
+        def new_window_app() -> DupeBotApp:
+            return DupeBotApp(
+                root, args.threshold, args.model, args.effort, show_traces=args.traces
+            )
+
+        LiveServer(new_window_app).serve(open_browser=not args.no_browser)
         return 0
 
     settings = ask_settings(args.threshold, args.model, args.effort, analyzing=args.analyze)
@@ -132,7 +155,7 @@ def _run(args, parser, settings) -> int:
                 f.write(text)
         except FileExistsError:
             parser.error(f"will not write over an existing file: {args.output}")
-    elif not args.analyze:
+    elif args.json:
         sys.stdout.write(text)
 
     summary = report["summary"]

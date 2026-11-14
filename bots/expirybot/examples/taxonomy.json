@@ -1,0 +1,113 @@
+{
+  "name": "Example home documents",
+  "description": "A starting point to copy and edit. The retention periods are placeholders, not advice: check what applies to you.",
+  "groups": [
+    {
+      "name": "Underlying app and system files",
+      "description": "Data that apps, tools and sync services keep in hidden folders. First, so that files inside them are never caught by the groups below.",
+      "match": {
+        "folders": [
+          ".git",
+          ".svn",
+          ".venv",
+          ".vscode",
+          ".idea",
+          ".obsidian",
+          ".ssh",
+          ".aws",
+          ".config",
+          ".dropbox.cache",
+          ".stversions"
+        ]
+      },
+      "keep_years": "forever"
+    },
+    {
+      "name": "Tax",
+      "description": "Returns and the forms and records behind them",
+      "match": {
+        "folders": [
+          "tax"
+        ]
+      },
+      "keep_years": 7,
+      "age_date": [
+        "modified"
+      ],
+      "subgroups": [
+        {
+          "name": "Returns",
+          "description": "Filed returns themselves",
+          "match": {
+            "words": [
+              "1040",
+              "return"
+            ]
+          },
+          "keep_years": "forever"
+        }
+      ]
+    },
+    {
+      "name": "Tax forms outside a tax folder",
+      "match": {
+        "words": [
+          "w-2",
+          "w2",
+          "1099",
+          "1098",
+          "1095"
+        ]
+      },
+      "keep_years": 7,
+      "age_date": [
+        "modified"
+      ]
+    },
+    {
+      "name": "Pay stubs",
+      "match": {
+        "words": [
+          "paystub",
+          "pay stub",
+          "payslip",
+          "earnings statement"
+        ]
+      },
+      "keep_years": 1,
+      "age_date": [
+        "name",
+        "modified"
+      ]
+    },
+    {
+      "name": "Bank and card statements",
+      "match": {
+        "words": [
+          "statement",
+          "stmt"
+        ]
+      },
+      "keep_years": 7,
+      "age_date": [
+        "name",
+        "modified"
+      ]
+    },
+    {
+      "name": "Bills and receipts",
+      "match": {
+        "words": [
+          "bill",
+          "receipt",
+          "invoice"
+        ]
+      },
+      "keep_years": 3,
+      "age_date": [
+        "name",
+        "modified"
+      ]
+    }
+  ]
+}

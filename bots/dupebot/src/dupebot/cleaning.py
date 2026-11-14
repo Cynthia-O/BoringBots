@@ -14,17 +14,16 @@ import re
 from dataclasses import dataclass, field
 from pathlib import PurePath
 
+from filefacts.clutter import is_clutter
+from filefacts.namedates import DATE_RE
+
 # --- Exclusions --------------------------------------------------------------
 
-# OS and sync-tool clutter, matched against the full file name.
-SYSTEM_FILES = frozenset({".ds_store", "thumbs.db", "desktop.ini", "icon\r"})
-
 # Name patterns that are never clustered, matched against the full file name.
+# System files and office lock files are excluded too (filefacts.clutter).
 EXCLUDED_NAME_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
-        r"^~\$",  # Microsoft Office owner/lock files: ~$report.docx
-        r"^\.~lock\..*#$",  # LibreOffice lock files: .~lock.report.odt#
         r"^img[_-]?\d+",  # camera and phone photos: IMG_1234.jpg
         r"^dsc[f_]?\d+",  # DSC_1234.jpg, DSCF1234.jpg, DSC01234.jpg
         r"^pxl_\d+",  # Google Pixel photos: PXL_20230115_123456.jpg
@@ -69,30 +68,9 @@ _GENERIC_TITLE_RE = re.compile(
 )
 
 # --- Dates -------------------------------------------------------------------
-# Removed from anywhere in the name. Bare numbers other than years 1990-2039 are
-# kept, so "Form 1040" stays intact.
-
-_MONTH = (
-    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
-    r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
-)
-_YEAR = r"(?:19|20)\d{2}"
-_MM = r"(?:0?[1-9]|1[0-2])"
-_DD = r"(?:0?[1-9]|[12]\d|3[01])"
-_SEP = r"[-_. ]"
-_DATE_FORMS = (
-    rf"{_YEAR}{_SEP}{_MM}{_SEP}{_DD}",  # 2023-01-15, 2023_1_5, 2023.01.15
-    rf"{_YEAR}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])",  # 20230115
-    rf"{_DD}{_SEP}{_DD}{_SEP}{_YEAR}",  # 01-15-2023, 15.01.2023
-    rf"{_MONTH}[-_. ]*{_DD}(?:st|nd|rd|th)?,?[-_. ]*{_YEAR}",  # Jan 15, 2023
-    rf"{_DD}(?:st|nd|rd|th)?[-_. ]*{_MONTH}[-_. ,]*{_YEAR}",  # 15 Jan 2023
-    rf"{_MONTH}[-_. ,]*{_YEAR}",  # Jan 2023, january_2023
-    rf"{_YEAR}[-_. ]*{_MONTH}",  # 2023 Jan, 2023-january
-    rf"{_YEAR}[-_.]{_MM}",  # 2023-01
-    r"(?:199\d|20[0-3]\d)",  # bare year, 1990-2039
-)
-# Alternatives are tried in order, so longer forms win over the bare year.
-_DATE_RE = re.compile(r"(?<![^\W_])(?:" + "|".join(_DATE_FORMS) + r")(?![^\W_])", re.IGNORECASE)
+# Removed from anywhere in the name. The patterns live in filefacts.namedates,
+# shared with ExpiryBot. Bare numbers other than years 1990-2039 are kept, so
+# "Form 1040" stays intact.
 
 # Copy numbers added by file managers and browsers: "report (1).pdf".
 _COPY_NUMBER_RE = re.compile(r"\(\d{1,3}\)")
@@ -234,8 +212,8 @@ def clean_name(filename: str) -> CleanedName:
     found = _Found()
 
     # Dates and copy numbers can sit anywhere in the name.
-    found.dates = [m.group(0) for m in _DATE_RE.finditer(stem)]
-    stem = _DATE_RE.sub(" ", stem)
+    found.dates = [m.group(0) for m in DATE_RE.finditer(stem)]
+    stem = DATE_RE.sub(" ", stem)
     found.version = [m.group(0) for m in _COPY_NUMBER_RE.finditer(stem)]
     stem = _COPY_NUMBER_RE.sub(" ", stem)
 
@@ -262,7 +240,7 @@ def exclusion_reason(name: CleanedName) -> str | None:
     Names that are empty after cleaning are not covered here; callers check
     ``name.cleaned`` for that.
     """
-    if name.original.lower() in SYSTEM_FILES:
+    if is_clutter(name.original):
         return "excluded"
     if any(p.search(name.original) for p in EXCLUDED_NAME_PATTERNS):
         return "excluded"

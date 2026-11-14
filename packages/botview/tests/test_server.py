@@ -153,7 +153,8 @@ def test_apps_get_an_update_function():
     app = App()
     server = LiveServer(app)
     try:
-        assert app.update == server.update
+        app.update(status="half way")
+        assert server.latest()["status"] == "half way"
     finally:
         server.httpd.server_close()
 
@@ -201,3 +202,74 @@ def test_locked_text_fields_show_a_fixed_value_the_page_cannot_change():
     html = controls_html([field])
     assert 'value="~/Demo" readonly' in html and "fixed" in html and "reset" not in html
     assert parse_values([field], {"folder": "/etc"}) == {"folder": "~/Demo"}
+
+
+# --- separate windows ---
+
+
+class Counter(EchoApp):
+    """Remembers how many times it ran, to tell windows apart."""
+
+    def __init__(self):
+        super().__init__()
+        self.runs = 0
+
+    def handle(self, action, values, data):
+        self.runs += 1
+        return Reply(status=f"run {self.runs}")
+
+
+@pytest.fixture
+def multi():
+    server = LiveServer(Counter)  # a function that makes an App: one per window
+    server.start()
+    yield server
+    server.stop()
+
+
+def open_window(server):
+    status, page = request(server, "GET", f"/?key={server.key}")
+    assert status == 200
+    return page.split('const WINDOW = "')[1].split('"')[0], page
+
+
+def act_in(server, window_id):
+    conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
+    conn.request(
+        "POST",
+        "/api/action",
+        body=json.dumps({"action": "run", "values": GOOD}),
+        headers={
+            "Host": f"127.0.0.1:{server.port}",
+            "X-Botview-Key": server.key,
+            "X-Botview-Window": window_id,
+            "Content-Type": "application/json",
+        },
+    )
+    return json.loads(conn.getresponse().read())
+
+
+def test_each_window_gets_its_own_app(multi):
+    first, page1 = open_window(multi)
+    second, page2 = open_window(multi)
+    assert first != second
+    assert "window 1" in page1 and "window 2" in page2 and "+ New window" in page2
+    assert act_in(multi, first)["status"] == "run 1"
+    assert act_in(multi, first)["status"] == "run 2"
+    assert act_in(multi, second)["status"] == "run 1"  # its own count
+
+
+def test_unknown_windows_are_told_to_reload(multi):
+    assert "expired" in act_in(multi, "no-such-window")["error"]
+
+
+def test_windows_are_capped(multi, monkeypatch):
+    monkeypatch.setattr("botview.server.MAX_WINDOWS", 2)
+    open_window(multi)  # takes the default window
+    open_window(multi)  # a second window: the limit
+    assert request(multi, "GET", f"/?key={multi.key}")[0] == 503
+
+
+def test_a_shared_app_keeps_one_window(live):
+    page = request(live, "GET", f"/?key={live.key}")[1]
+    assert "+ New window" not in page and "window 1" not in page

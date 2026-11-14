@@ -11,6 +11,7 @@ from botview.page import TONES, Action, Badge, Block, Card, Page, Section, Table
 from botview.publish import open_in_browser, write_page
 from botview.server import App, Confirm, LiveServer, Reply, serve
 from botview.stages import Stage
+from botview.timeline import Span, Timeline
 from botview.waterfall import Step, Waterfall
 
 __all__ = [
@@ -31,11 +32,13 @@ __all__ = [
     "Section",
     "Series",
     "Slider",
+    "Span",
     "Stage",
     "Step",
     "Table",
     "Text",
     "TextField",
+    "Timeline",
     "Waterfall",
     "open_in_browser",
     "render",

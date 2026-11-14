@@ -16,7 +16,16 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
-from bottrace import Tracer, current_span, current_trace_id, finished_spans, timing_blocks
+from bottrace import (
+    Tracer,
+    current_span,
+    current_trace_id,
+    finished_spans,
+    read_traces,
+    timing_blocks,
+    traces_facts,
+    traces_sections,
+)
 from botview import (
     Action,
     Badge,
@@ -50,6 +59,10 @@ from finops.pricing import PRICES_CHECKED, Cost, call_cost, usd
 
 # The folder the page starts on when none is given on the command line.
 DEFAULT_FOLDER = "~/Desktop"
+
+# The traces snapshot (--traces): requests listed, and how many get a timeline.
+TRACES_LISTED = 20
+TRACES_DETAILED = 3
 
 STAGE_TITLES = ("Choose folder and settings", "Analysis", "Prioritization agent")
 ANALYSIS_WAITING = "Starts when you send the scanned clusters to the model."
@@ -137,12 +150,18 @@ class TokenTally:
         ]
         blocks = [
             Table(
-                ["", "Session tokens", "Session cost", "Last run tokens", "Last run cost"],
+                [
+                    "",
+                    "This window: tokens",
+                    "This window: cost",
+                    "Last run tokens",
+                    "Last run cost",
+                ],
                 rows,
                 row_tones=[None, None, None, None, "info", None],
                 numeric=frozenset({1, 2, 3, 4}),
             ),
-            Text(f"Last run: {self.last_label}." if last else "No runs sent yet this session."),
+            Text(f"Last run: {self.last_label}." if last else "No runs sent yet in this window."),
             Text(
                 "Token counts are as the API reported them. A run can be several calls when "
                 f"the clusters are split into batches. Every call is also kept in {log_path}."
@@ -177,9 +196,9 @@ class TokenTally:
         return Section(
             "Token usage and estimated cost",
             [
-                Badge(f"{usd(s.cost.total)} this session", "info"),
-                Badge(f"session started {self.started:%H:%M}"),
-                Badge("resets on restart"),
+                Badge(f"{usd(s.cost.total)} in this window", "info"),
+                Badge(f"window opened {self.started:%H:%M}"),
+                Badge("each window counts its own"),
             ],
             blocks,
         )
@@ -204,8 +223,10 @@ class DupeBotApp:
         model: str | None = None,
         effort: str | None = None,
         client=None,  # an Anthropic client; tests pass a stand-in
+        show_traces: bool = False,  # add a snapshot of recent traces to the page's foot
     ):
         self.client = client
+        self.show_traces = show_traces
         self.title = "DupeBot"
         self.subtitle = (
             "Suggestions only: DupeBot never deletes, moves or changes files. "
@@ -267,7 +288,29 @@ class DupeBotApp:
         ]
 
     def footer(self) -> list[Section]:
-        return [self.tally.section(default_db_path())]
+        sections = [self.tally.section(default_db_path())]
+        if self.show_traces:
+            sections += self._traces_snapshot()
+        return sections
+
+    def _traces_snapshot(self) -> list[Section]:
+        """What `uv run traces` shows, across all windows and bots, as of now."""
+        traces = read_traces(limit=TRACES_LISTED)
+        intro = Section(
+            "Traces",
+            [Badge("all windows and bots"), Badge(f"as of {datetime.now():%H:%M:%S}")],
+            [
+                Text(
+                    "A snapshot of `uv run traces`: recent requests, newest first, with "
+                    f"timelines for the newest {TRACES_DETAILED}. It refreshes whenever this "
+                    "window finishes an action."
+                )
+            ],
+        )
+        figures = Section(
+            "At a glance", [], [Table(["", ""], traces_facts(traces), numeric=frozenset({1}))]
+        )
+        return [intro, figures, *traces_sections(traces, detail=TRACES_DETAILED)]
 
     def handle(self, action: str, values: dict, data: dict) -> Reply:
         if action in ("run", "send"):

@@ -13,7 +13,7 @@ from dupebot.cluster import (
     FileRecord,
     ScanResult,
 )
-from dupebot.metadata import read_authors
+from filefacts.embedded import read_authors
 
 
 @traced("build report", kind="stage")

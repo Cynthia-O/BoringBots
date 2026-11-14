@@ -40,3 +40,46 @@ def test_command_line_runs_are_traced(tmp_path):
     [spans] = read_traces()
     assert spans[-1]["name"] == "command line" or any(s["name"] == "command line" for s in spans)
     assert {"walk folder", "cluster names", "build report"} <= {s["name"] for s in spans}
+
+
+def test_traces_flag_is_for_the_browser_app(tmp_path):
+    with pytest.raises(SystemExit):
+        main([str(tmp_path), "--json", "--traces"])
+
+
+class FakeServer:
+    started = []
+
+    def __init__(self, make_app):
+        self.make_app = make_app
+
+    def serve(self, open_browser=True):
+        FakeServer.started.append((self.make_app(), open_browser))
+
+
+@pytest.mark.parametrize("extra", [[], ["--ui"]])  # --ui is still accepted
+def test_browser_app_is_the_default(tmp_path, monkeypatch, extra):
+    monkeypatch.setattr("dupebot.cli.LiveServer", FakeServer)
+    FakeServer.started.clear()
+    assert main([str(tmp_path), "--no-browser", *extra]) == 0
+    [(app, open_browser)] = FakeServer.started
+    assert app.__class__.__name__ == "DupeBotApp"
+    assert open_browser is False
+
+
+def test_browser_app_needs_no_folder(monkeypatch):
+    monkeypatch.setattr("dupebot.cli.LiveServer", FakeServer)
+    FakeServer.started.clear()
+    assert main([]) == 0
+    assert len(FakeServer.started) == 1
+
+
+def test_json_prints_the_report(tmp_path, capsys):
+    assert main([str(tmp_path), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["summary"]["clusters"] == 0
+
+
+def test_terminal_modes_need_a_folder():
+    for flags in (["--json"], ["--analyze"], ["--output", "r.json"]):
+        with pytest.raises(SystemExit):
+            main(flags)

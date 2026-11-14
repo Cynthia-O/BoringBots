@@ -6,6 +6,11 @@ confirm, or an error). botview serves the page, sends the user's clicks to
 handle(), and shows what comes back. The server lives as long as the session:
 stopping it (Ctrl+C) ends the session.
 
+Windows: give LiveServer a function that makes an App (rather than an App) and
+every browser window opened on it gets its own App, with its own settings,
+results and progress, so several experiments can run side by side. Shared
+records (traces, logs) are the app's business.
+
 Safety: the server listens only on this machine (127.0.0.1). Every request must
 carry a random key minted for this session, and requests naming another host are
 refused. Together these stop other websites open in the browser from driving the
@@ -19,7 +24,7 @@ import sys
 import threading
 import traceback
 import webbrowser
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Protocol
@@ -37,6 +42,7 @@ from botview.page import CSS, Page, Section, document, facts_html, render_body, 
 from botview.stages import STAGES_CSS, stages_html
 
 MAX_REQUEST_BYTES = 1_000_000
+MAX_WINDOWS = 20  # windows per server; each holds its own App
 
 
 @dataclass(frozen=True)
@@ -82,27 +88,78 @@ class App(Protocol):
     # redraws the results area whenever a new page arrives.
 
 
-class LiveServer:
-    """Serves one App on 127.0.0.1. Use start() in tests, serve() for real.
+@dataclass
+class _Window:
+    """One browser window's own App and the progress of its running action."""
 
-    Subclasses can extend who may connect: handler_base (the request handler
-    class), allowed_hosts() and act() are the extension points.
+    number: int
+    app: "App"
+    busy: threading.Lock = field(default_factory=threading.Lock)
+    # (version, status, results html, stages html), replaced as one tuple so a
+    # poll from another thread always sees a whole update.
+    latest: tuple[int, str, str | None, str] = (0, "", None, "")
+    id: str = field(default_factory=lambda: secrets.token_urlsafe(12))
+
+
+class LiveServer:
+    """Serves an App on 127.0.0.1. Use start() in tests, serve() for real.
+
+    app: an App, shared by every window, or a function that makes one, so each
+    window gets its own. Subclasses can extend who may connect: handler_base
+    (the request handler class), allowed_hosts() and act() are the extension
+    points.
     """
 
-    def __init__(self, app: App, port: int = 0):
-        self.app = app
+    def __init__(self, app: "App | Callable[[], App]", port: int = 0):
         self.key = secrets.token_urlsafe(24)
-        self._busy = threading.Lock()
-        # What the running action last reported: (version, status, results html).
-        # Replaced as one tuple, so a poll from another thread sees a whole update.
-        self._latest: tuple[int, str, str | None, str] = (0, "", None, "")
-        use_updates = getattr(app, "use_updates", None)
-        if callable(use_updates):
-            use_updates(self.update)
+        # A class, or a function that is not itself an App, makes one App per window.
+        if isinstance(app, type) or (callable(app) and not hasattr(app, "handle")):
+            self._make_app, self.multi_window = app, True
+        else:
+            self._make_app, self.multi_window = (lambda: app), False
+        self._windows: dict[str, _Window] = {}
+        self._lock = threading.Lock()
+        self.default_window = self._create_window()  # requests naming no window use it
+        self._default_claimed = False  # the first page opened takes the default window
+        self.app = self.default_window.app  # for the title and the like
         handler = type("Handler", (self.handler_base,), {"live": self})
         self.httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)
         self.port = self.httpd.server_address[1]
         self.url = f"http://127.0.0.1:{self.port}/?key={self.key}"
+
+    def new_window(self) -> _Window | None:
+        """A window for a page being opened, or None when there are too many."""
+        with self._lock:
+            if not self._default_claimed or not self.multi_window:
+                self._default_claimed = True
+                return self.default_window  # the first page, or the only App
+            if len(self._windows) >= MAX_WINDOWS:
+                return None
+            window = self._register()  # checked and created under one lock
+        return self._hook_updates(window)
+
+    def _create_window(self) -> _Window:
+        with self._lock:
+            window = self._register()
+        return self._hook_updates(window)
+
+    def _register(self) -> _Window:
+        window = _Window(len(self._windows) + 1, self._make_app())
+        self._windows[window.id] = window
+        return window
+
+    def _hook_updates(self, window: _Window) -> _Window:
+        use_updates = getattr(window.app, "use_updates", None)
+        if callable(use_updates):
+            use_updates(lambda status=None, page=None: self.update(status, page, window))
+        return window
+
+    def window(self, window_id: str | None) -> _Window | None:
+        """The window a request names, the default window if it names none,
+        or None if it names one that does not exist."""
+        if not window_id:
+            return self.default_window
+        return self._windows.get(window_id)
 
     @property
     def handler_base(self) -> type["LiveHandler"]:
@@ -119,6 +176,12 @@ class LiveServer:
     def serve(self, open_browser: bool = True) -> bool:
         """Run until Ctrl+C. Returns False if the server could not start."""
         print(f"{self.app.title} is running at {self.url}", file=sys.stderr)
+        if self.multi_window:
+            print(
+                "Each window you open runs on its own: use the page's New window link, "
+                "or open the address again.",
+                file=sys.stderr,
+            )
         print("Press Ctrl+C here to stop it and end the session.", file=sys.stderr)
         if open_browser and not open_in_browser_url(self.url):
             print("Could not open a browser; open the address above yourself.", file=sys.stderr)
@@ -136,11 +199,26 @@ class LiveServer:
 
     # --- what the handler calls ---
 
-    def shell(self, key: str | None = None, notice: str | None = None) -> str:
-        """The app's page. key: the key its requests must carry (the host's by
-        default). notice: an optional line shown under the title."""
-        app = self.app
-        head = [f'<header class="app-head"><h1>{_e(app.title)}</h1>']
+    def shell(
+        self,
+        key: str | None = None,
+        notice: str | None = None,
+        window: _Window | None = None,
+        new_window_href: str | None = None,
+    ) -> str:
+        """A window's page. key: the key its requests must carry (the host's by
+        default). notice: an optional line under the title. new_window_href:
+        where the New window link points (the host's address by default)."""
+        window = window or self.default_window
+        app = window.app
+        title = f"{app.title} · window {window.number}" if self.multi_window else app.title
+        head = [f'<header class="app-head"><h1>{_e(title)}</h1>']
+        if self.multi_window:
+            href = new_window_href or f"/?key={key or self.key}"
+            head.append(
+                f'<p class="new-window"><a href="{_e(href)}" target="_blank" rel="noopener">'
+                "+ New window</a> runs separately, with its own settings and results.</p>"
+            )
         if notice:
             head.append(f'<p class="callout tone-info">{_e(notice)}</p>')
         if app.subtitle:
@@ -151,7 +229,7 @@ class LiveServer:
         body = "\n".join(
             [
                 *head,
-                f'<div id="stages">{self.stages_html()}</div>',
+                f'<div id="stages">{self.stages_html(window)}</div>',
                 '<form id="controls" class="controls">',
                 controls_html(app.controls),
                 '<div class="actions">'
@@ -161,56 +239,66 @@ class LiveServer:
                 '<div id="error" class="error" hidden></div>',
                 '<div id="confirm" class="confirm" hidden></div>',
                 '<div id="results"></div>',
-                f'<footer id="footer" class="app-footer">{self.footer_html()}</footer>',
+                f'<footer id="footer" class="app-footer">{self.footer_html(window)}</footer>',
             ]
         )
-        script = to_json_script("KEY", key or self.key) + CONTROLS_JS + _APP_JS
-        return document(app.title, body, script, body_class="live").replace(
+        script = (
+            to_json_script("KEY", key or self.key)
+            + to_json_script("WINDOW", window.id)
+            + CONTROLS_JS
+            + _APP_JS
+        )
+        return document(title, body, script, body_class="live").replace(
             f"<style>{CSS}</style>", f"<style>{CSS}{CONTROLS_CSS}{STAGES_CSS}</style>"
         )
 
-    def stages_html(self) -> str:
-        stages = getattr(self.app, "stages", None)
+    def stages_html(self, window: _Window | None = None) -> str:
+        stages = getattr((window or self.default_window).app, "stages", None)
         return stages_html(stages()) if callable(stages) else ""
 
-    def footer_html(self) -> str:
-        return "\n".join(section_html(s) for s in self.app.footer())
+    def footer_html(self, window: _Window | None = None) -> str:
+        return "\n".join(section_html(s) for s in (window or self.default_window).app.footer())
 
-    def update(self, status: str | None = None, page: Page | None = None) -> None:
-        """Called by the app during handle() to show progress (see App)."""
-        version, old_status, old_html, _ = self._latest
-        self._latest = (
+    def update(
+        self, status: str | None = None, page: Page | None = None, window: _Window | None = None
+    ) -> None:
+        """Called by an app during handle() to show progress (see App)."""
+        window = window or self.default_window
+        version, old_status, old_html, _ = window.latest
+        window.latest = (
             version + 1,
             old_status if status is None else str(status),
             old_html if page is None else render_body(page),
-            self.stages_html(),  # the app may have moved on a stage too
+            self.stages_html(window),  # the app may have moved on a stage too
         )
 
-    def latest(self) -> dict:
-        version, status, html, stages = self._latest
+    def latest(self, window: _Window | None = None) -> dict:
+        version, status, html, stages = (window or self.default_window).latest
         return {"version": version, "status": status, "html": html, "stages": stages}
 
-    def act(self, request: dict, role: str = "host") -> dict:
-        """Run one action. role says who asked; this server only has the host."""
-        if not self._busy.acquire(blocking=False):
+    def act(self, request: dict, role: str = "host", window: _Window | None = None) -> dict:
+        """Run one action in a window. role says who asked; this server only has the host."""
+        window = window or self.default_window
+        app = window.app
+        if not window.busy.acquire(blocking=False):
             return {"error": "Still working on the last request. Please wait for it to finish."}
-        self._latest = (0, "", None, "")
+        window.latest = (0, "", None, "")
         try:
             try:
-                values = parse_values(self.app.controls, request.get("values") or {})
+                values = parse_values(app.controls, request.get("values") or {})
             except ValueError as e:
                 return {"error": str(e)}
             action = request.get("action")
             if not isinstance(action, str):
                 return {"error": "No action given."}
             try:
-                reply = self.app.handle(action, values, dict(request.get("data") or {}))
+                reply = app.handle(action, values, dict(request.get("data") or {}))
             except Exception as e:
                 traceback.print_exc()
                 reply = Reply(error=f"Something went wrong: {type(e).__name__}: {e}")
             out: dict = {
-                "footer": self.footer_html(),
-                "stages": self.stages_html(),
+                "footer": self.footer_html(window),
+                "stages": self.stages_html(window),
                 "error": reply.error,
                 "status": reply.status,
             }
@@ -227,8 +315,8 @@ class LiveServer:
                 }
             return out
         finally:
-            self._latest = (0, "", None, "")
-            self._busy.release()
+            window.latest = (0, "", None, "")
+            window.busy.release()
 
 
 def serve(app: App, open_browser: bool = True) -> None:
@@ -298,7 +386,10 @@ class LiveHandler(BaseHTTPRequestHandler):
             return self.refuse(404, "Not found")
         key = parse_qs(parts.query).get("key", [""])[0]
         if parts.path == "/" and secrets.compare_digest(key, self.live.key):
-            return self.send_html(200, self.live.shell())
+            window = self.live.new_window()
+            if window is None:
+                return self.refuse(503, "Too many windows open. Close some, or restart.")
+            return self.send_html(200, self.live.shell(window=window))
         if self.other_get(parts):
             return
         return self.refuse(403, "Open the address printed in the terminal.")
@@ -311,8 +402,11 @@ class LiveHandler(BaseHTTPRequestHandler):
         role = self.role()
         if role is None:
             return self.refuse(403, "Forbidden")
+        window = self.live.window(self.headers.get("X-Botview-Window"))
+        if window is None:
+            return self.respond_json({"error": "This window has expired. Reload the page."}, role)
         if self.path == "/api/progress":  # answered while an action runs
-            return self.respond_json(self.live.latest(), role)
+            return self.respond_json(self.live.latest(window), role)
         if self.path != "/api/action":
             return self.refuse(404, "Not found")
         length = int(self.headers.get("Content-Length") or 0)
@@ -324,7 +418,7 @@ class LiveHandler(BaseHTTPRequestHandler):
                 raise ValueError
         except ValueError:
             return self.refuse(400, "Bad request")
-        self.respond_json(self.live.act(request, role), role)
+        self.respond_json(self.live.act(request, role, window), role)
 
 
 def _e(text: str) -> str:
@@ -370,7 +464,9 @@ async function act(action, data, keepConfirm) {
     if (polling) return;
     polling = true;
     try {
-      const r = await fetch('/api/progress', {method: 'POST', headers: {'X-Botview-Key': KEY}});
+      const r = await fetch('/api/progress', {
+        method: 'POST', headers: {'X-Botview-Key': KEY, 'X-Botview-Window': WINDOW},
+      });
       if (r.ok && !finished) {
         const latest = await r.json();
         if (finished) return;
@@ -392,7 +488,9 @@ async function act(action, data, keepConfirm) {
   try {
     const response = await fetch('/api/action', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json', 'X-Botview-Key': KEY},
+      headers: {
+        'Content-Type': 'application/json', 'X-Botview-Key': KEY, 'X-Botview-Window': WINDOW,
+      },
       body: JSON.stringify({action, values: values(), data: data || {}}),
     });
     if (!response.ok) throw new Error(`the bot answered ${response.status}`);

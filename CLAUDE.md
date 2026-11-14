@@ -13,13 +13,15 @@ This is a uv workspace on Python 3.11+. The root `pyproject.toml` has no code of
 ```sh
 ./install.sh                               # first-time setup: installs uv if missing, then syncs
 uv sync --all-packages                     # install all bots plus dev tools
-uv run --package dupebot dupebot <dir>
-uv run --package dupebot dupebot <dir> --analyze   # calls the API; key in .env (copy .env.example)
-uv run --package dupebot dupebot [<dir>] --ui      # browser app: folder, settings, scan, send, token/cost tally
+uv run --package dupebot dupebot [<dir>]          # browser app (default): folder, settings, scan, send, token/cost tally
+uv run --package dupebot dupebot --traces          # same, with a traces snapshot at the foot of each window
+uv run --package dupebot dupebot <dir> --json      # terminal: print the cluster report (or --output r.json)
+uv run --package dupebot dupebot <dir> --analyze   # terminal; calls the API; key in .env (copy .env.example)
 uv run --package formbot formbot <form.pdf|form.docx>
 uv run spend                               # spend dashboard across all bots (finops)
 uv run traces                              # request traces across all bots (bottrace)
-uv run --package expirybot expirybot <dir>   # likewise catalogbot, tidybot (stubs for now)
+uv run --package expirybot expirybot <dir> [--taxonomy t.json]   # survey, or flag against a taxonomy
+uv run --package catalogbot catalogbot <dir>   # likewise tidybot (stubs for now)
 uv run pytest                              # all tests
 uv run pytest bots/formbot                 # one bot (or packages/botview)
 uv run pytest bots/formbot/tests/test_cli.py::test_accepts_pdf   # one test
@@ -28,11 +30,13 @@ uv run ruff check . && uv run ruff format .
 
 To add a bot, copy an existing bot's folder layout. It is picked up automatically through the `bots/*` glob. Add a bot's runtime dependencies to that bot's own `pyproject.toml`, not the root one. Code shared between bots lives in `packages/*` (also workspace members); a bot depends on a package by listing it in `dependencies` plus `[tool.uv.sources] <pkg> = { workspace = true }`. Otherwise, only move code into a shared package once two bots actually need it.
 
+**File facts (`packages/filefacts`):** read-only facts shared by DupeBot and ExpiryBot: dates written in names (`namedates.py`, matched and read as dates), authors and dates stored inside Office, OpenDocument and PDF files (`embedded.py`), and system clutter (`clutter.py`).
+
 **Spend tracking (`packages/finops`):** model prices (`pricing.py`, checked by hand; update `PRICES_CHECKED` with them) and the `spend` dashboard, which reads every bot's `llm_calls` log read-only. A bot that calls a model logs each call to its own append-only `llm_calls` table (see `dupebot/calllog.py`) and is listed in `finops/ledger.py` `SOURCES`.
 
 **Tracing (`packages/bottrace`):** every human request (a browser click, a command run) is one trace of nested spans (stage, llm, turn, tool, wait) in the local `~/.boringbots/traces.sqlite`. Bots start a trace with `Tracer("Bot").trace(...)` and mark steps with `span(...)` or `@traced`, which do nothing outside a trace. Model calls should record tokens, cost and time to first token (see `dupebot.analyze.stream_and_log`); use the trace id as the call log's `run_id` so the two join.
 
-**Shared browser UI (`packages/botview`):** every bot shows results to the user in a local browser page built with botview, not as tables in the terminal. A bot describes the page as data (`Page`, `Section`, `Card`, `Table`, `Text`, `Badge`); botview renders a self-contained HTML file (no web requests), writes it as a new file, and opens it. Keep bot-specific content in the bot (e.g. `dupebot/view.py`) and keep botview generic. For interactive use, botview also runs a live app (`LiveServer`): a local page with settings controls (`Choice`, `Slider`) whose actions call the bot's `handle()`; see `dupebot/ui.py`. Anything that spends money goes through a `Confirm` step first.
+**Shared browser UI (`packages/botview`):** every bot shows results to the user in a local browser page built with botview, not as tables in the terminal. A bot describes the page as data (`Page`, `Section`, `Card`, `Table`, `Text`, `Badge`); botview renders a self-contained HTML file (no web requests), writes it as a new file, and opens it. Keep bot-specific content in the bot (e.g. `dupebot/view.py`) and keep botview generic. For interactive use, botview also runs a live app (`LiveServer`): a local page with settings controls (`Choice`, `Slider`) whose actions call the bot's `handle()`; see `dupebot/ui.py`. Pass it a class or factory (not an instance) to give each browser window its own App; keep per-run state on the App and project-wide records (traces, logs) in their shared stores. Anything that spends money goes through a `Confirm` step first.
 
 ## Design rule shared by all bots: create, but never edit or delete
 
@@ -52,7 +56,7 @@ Finds likely duplicate files and older versions so the user can decide what to d
 V1 sources: local files on the Mac and Google Drive.
 
 ### ExpiryBot
-Suggests retention groups for the user's documents (for example, tax documents kept for 3 to 7 years) and discusses them with the user until they settle on a retention taxonomy. It then flags documents past their retention period so the user can delete them. **Unresolved:** the spec says it can move documents to a `/deprecate/` subfolder on request, which conflicts with the no-move rule above. Do not build the move feature until the user resolves this.
+Suggests retention groups for the user's documents (for example, tax documents kept for 7 years) and works through them with the user until they settle on a retention taxonomy. Only proposing and revising groups uses a model. The survey, rule matching, the comparison of date sources and flagging are all plain Python. For each settled group, the user chooses which date a document's age is counted from (modified, created, date in the name, folder year or a date stored inside the file); there is no single fixed rule. It then flags documents past their retention period so the user can delete them. Moving files to a `/deprecate/` subfolder is not built because it conflicts with the no-move rule; a written list of expired files serves that purpose instead. Details are in the bot's README.
 
 ### CatalogBot
 Writes a README in each folder describing what that folder and its subfolders contain, giving a quick overview of the corpus. Under the design rule, it must skip any folder that already has a README rather than overwrite it.

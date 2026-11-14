@@ -1,0 +1,13 @@
+[project]
+name = "filefacts"
+version = "0.1.0"
+description = "Read-only facts about files shared by BoringBots: dates in names, metadata stored inside documents, system clutter."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pypdf>=5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

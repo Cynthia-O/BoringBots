@@ -38,10 +38,10 @@ uv run dupebot ~/Documents --analyze
 
 DupeBot tells you what it is about to send and asks before sending anything. The results open as a page in your browser. The page is a file on your computer and loads nothing from the internet.
 
-To run test rounds from the browser instead, with settings controls (including the folder to scan) and a running tally of tokens and estimated cost:
+Run with no flags, DupeBot opens its browser app instead, for test rounds with settings controls (including the folder to scan) and a running tally of tokens and estimated cost:
 
 ```sh
-uv run dupebot --ui
+uv run dupebot
 ```
 
 Press Ctrl+C in Terminal to stop it.
@@ -62,7 +62,18 @@ To see what each request did, step by step, and how long each step took:
 uv run traces
 ```
 
-Each click in a bot's browser app, or run of a command, is one trace: a timeline of its steps (model calls, agent turns, tool calls), where the time went, and tokens and estimated cost per step. Traces stay in a local file, `~/.boringbots/traces.sqlite`.
+Each click in a bot's browser app, or run of a command, is one trace: a timeline of its steps (model calls, agent turns, tool calls), where the time went, and tokens and estimated cost per step. Traces stay in a local file, `~/.boringbots/traces.sqlite`. To see the same snapshot at the foot of DupeBot's browser app, run `uv run dupebot --traces`.
+
+## Expiry
+To see which dates the files in a folder carry, and then which files are past the retention period you choose:
+
+```sh
+uv run expirybot ~/Documents
+uv run expirybot ~/Documents --taxonomy my-taxonomy.json
+uv run expirybot ~/Documents --taxonomy my-taxonomy.json --expired-list expired.csv
+```
+
+The first command surveys the folder: how many files carry each kind of date (modified, created, a date in the name or folder name, or a date stored inside the file), plus folders, hidden folders and file types. The second flags each file as expired, expiring soon, kept, undated or not in any group, using a taxonomy you write: groups of files, how many years to keep each, and which date each group's age counts from. Copy `bots/expirybot/examples/taxonomy.json` to start. The third also writes the expired files to a new CSV or JSON file, for example to keep them out of a RAG index. All three are free (no model calls) and read-only, and each opens a page in your browser. Add `--today 2027-01-01` to see what would expire on another date.
 
 ## Share
 To share with a remote user, visit the SHARE_README.md in packages/botview.
@@ -71,7 +82,7 @@ To share with a remote user, visit the SHARE_README.md in packages/botview.
 DupeBot helps you clear out clutter by finding files on your Mac and in Google Drive that are likely duplicates, older versions or convenience copies of one another. It groups candidate files by name and file type, then explains what it found so you can decide what to delete. It never deletes anything itself, so that decision always stays with you.
 
 ## [ExpiryBot](bots/expirybot/)
-ExpiryBot takes a look at your data, suggests some retention groups (e.g., "tax documents and accessories, retain for 3-7 years"), and discusses those suggestions with you until you decide on a retention taxonomy. It then flags stale documents that you may want to delete. It can move the documents to a /deprecate/ subfolder if you ask it to, but cannot delete documents itself.
+ExpiryBot takes a look at your data, suggests some retention groups (e.g., "tax documents and accessories, retain for 3-7 years"), and discusses those suggestions with you until you decide on a retention taxonomy. For each group you choose which date a document's age counts from, and it then flags documents past their retention period that you may want to delete. It never deletes, moves or edits documents itself. So far it surveys and flags against a taxonomy you write (see [Expiry](#expiry) above); suggesting groups with a model comes next.
 
 ## [CatalogBot](bots/catalogbot/)
 CatalogBot produces a README in every folder, describing what is contained in that folder and its subfolders. CatalogBot can quickly let you know what you have in your corpus.

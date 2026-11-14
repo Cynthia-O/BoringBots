@@ -7,15 +7,19 @@ This bot will have three jobs:
 From the BoringBots folder:
 
 ```sh
-# browser app: choose folder and settings, scan, send, see suggestions
-uv run dupebot --ui      
-# print the cluster report as JSON; no model calls    
-# ~/Desktop/ is only an example folder - replace as desired              
-uv run dupebot ~/Desktop/     
-# write the report to a new file instead                  
-uv run dupebot ~/Desktop/ --output report.json  
+# browser app (the default): choose folder and settings, scan, send, see suggestions
+# (each window opened with its "+ New window" link runs separately, e.g. Haiku in one, Sonnet in another)
+uv run dupebot
+# same, starting on a folder (~/Desktop/ is only an example - replace as desired)
+uv run dupebot ~/Desktop/
+# same, with a snapshot of recent traces at the foot of each window
+uv run dupebot --traces
+# in the terminal instead: print the cluster report as JSON; no model calls
+uv run dupebot ~/Desktop/ --json
+# write the report to a new file instead
+uv run dupebot ~/Desktop/ --output report.json
 # send clusters to the model and open the results page (asks first)
-uv run dupebot ~/Desktop/ --analyze       
+uv run dupebot ~/Desktop/ --analyze
 # open finops page (universal across all bots)
 uv run spend   
 # open traces page: step-by-step timelines of recent requests (universal across all bots)
@@ -45,7 +49,7 @@ Names that are empty after cleaning are skipped and listed in the report.
 4. Buckets are processed in parallel, one bucket per core, using one core fewer than the machine has. Small jobs run in one process, because starting workers would cost more than it saves.
 
 ### Handoff to the LLM (`report.py`)
-A JSON report: settings, summary counts, skipped counts, and one entry per cluster with its id, extension and files (oldest first). Each file carries its path, original name, cleaned name, size, modified time, created-by and modified-by (`metadata.py`; read only for clustered files, and only from formats that store them: Word, Excel, PowerPoint and OpenDocument), and the dates, version markers and set markers stripped from it. It is printed to stdout, or written with `--output` to a new file; DupeBot refuses to write over an existing file.
+A JSON report: settings, summary counts, skipped counts, and one entry per cluster with its id, extension and files (oldest first). Each file carries its path, original name, cleaned name, size, modified time, created-by and modified-by (read by the shared `filefacts` package; read only for clustered files, and only from formats that store them: Word, Excel, PowerPoint and OpenDocument), and the dates, version markers and set markers stripped from it. It is printed to stdout, or written with `--output` to a new file; DupeBot refuses to write over an existing file.
 
 ## Stage 2: analysis (LLM)
 
@@ -75,9 +79,13 @@ Before a run, DupeBot shows its settings with their defaults and asks "Keep thes
 `dupebot <dir> --analyze` sends the clusters to the chosen model and shows the analysis as a page in your browser, built with the shared `botview` package (`view.py`). Each run writes a new page to `~/.dupebot/pages/` (next to the call log), and the terminal gets a one-line summary per cluster. `--no-browser` saves the page without opening it. Whole clusters are packed into requests of up to 200 files; a cluster is never split. It states what will be sent and asks before sending (`--yes` skips the question). The API key comes from `ANTHROPIC_API_KEY`, normally set in the git-ignored `.env` at the repo root (template: `.env.example`).
 
 ### Browser app (`ui.py`)
+**Windows.** Each browser window runs its own DupeBot: its own settings, stages, results and token tally, and its own requests, so you can run experiments side by side (say Haiku in one window and Sonnet in another) and send in both at once. Open another with the **+ New window** link under the title, or by opening the address again; windows are numbered in their titles. Traces, the call log and the spend dashboard are shared, since they cover the whole project. Up to 20 windows per run.
+
+**Traces snapshot (`--traces`).** With `--traces`, the foot of each window also shows what `uv run traces` shows: headline figures and recent requests from all windows and bots, with timelines for the newest three. It refreshes whenever that window finishes an action.
+
 Across the top, under the title, three numbered stages show where a round has got to: **1 Choose folder and settings**, **2 Analysis**, **3 Prioritization agent**. Completed stages are a saturated green, stages still to come a pale green, and the one in progress has a solid outline. Each stage carries a short live detail, such as clusters answered or what the agent is checking. A new scan resets stages 2 and 3. Saved copies of the results page have no stages, so they keep a notice that these are only suggestions, plus the agent's summary.
 
-`dupebot <dir> --ui` runs DupeBot from a page in your browser, for test rounds without going back to the terminal. At the top are the settings: the folder to scan (a text field, starting on the folder given on the command line, if any; `~` works for your home folder), a slider for the similarity threshold, and toggles for the model and thinking effort. With `--ui` the folder argument is optional. Each control marks its default (dashed outline and a "default" tag). Flags such as `--threshold` preselect a control, and the default stays marked. Each round has two steps, so nothing is spent before you've seen what will be sent:
+`dupebot [<dir>]` with no other flags runs DupeBot from a page in your browser, for test rounds without going back to the terminal. (`--ui` from earlier versions still works, but is no longer needed.) At the top are the settings: the folder to scan (a text field, starting on the folder given on the command line, if any; `~` works for your home folder), a slider for the similarity threshold, and toggles for the model and thinking effort. The folder argument is optional here. Each control marks its default (dashed outline and a "default" tag). Flags such as `--threshold` preselect a control, and the default stays marked. Each round has two steps, so nothing is spent before you've seen what will be sent:
 1. **Scan folder** clusters the folder at the chosen threshold and shows the clusters, including the cleaned name each file was matched as (local only; no API call).
 2. **Send to model** sends exactly those clusters with the model and effort chosen at scan time, and the results page builds up as you watch:
    - **Analysis:** every cluster starts as a "waiting" placeholder and fills in, top to bottom, as the model writes its answer for it. The answer streams in, and each cluster is shown as soon as its part is complete. The status line counts clusters answered.

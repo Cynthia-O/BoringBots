@@ -22,7 +22,7 @@ from bottrace.trace import (
     span,
     traced,
 )
-from bottrace.view import timing_blocks, traces_page
+from bottrace.view import timing_blocks, traces_facts, traces_page, traces_sections
 
 __all__ = [
     "Span",
@@ -37,6 +37,8 @@ __all__ = [
     "summarize",
     "timing_blocks",
     "traced",
+    "traces_facts",
     "traces_page",
+    "traces_sections",
     "waterfall_rows",
 ]

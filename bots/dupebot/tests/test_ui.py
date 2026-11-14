@@ -431,3 +431,87 @@ def test_send_is_traced_step_by_step(corpus, DEFAULTS, tmp_path):
     from botview import render
 
     assert "How long this took" in render(reply.page)
+
+
+# --- separate windows and the traces snapshot ---
+
+
+class SlowClient(Client):
+    """Takes a moment to answer, so two windows' sends overlap."""
+
+    def _stream(self, **request):
+        import time
+
+        time.sleep(0.3)
+        return super()._stream(**request)
+
+
+def test_two_windows_can_send_at_the_same_time(corpus):
+    import http.client
+    import threading
+
+    from botview import LiveServer
+
+    server = LiveServer(lambda: DupeBotApp(client=SlowClient()))
+    server.start()
+    host = {
+        "Host": f"127.0.0.1:{server.port}",
+        "X-Botview-Key": server.key,
+        "Content-Type": "application/json",
+    }
+    values = {
+        "folder": str(corpus),
+        "threshold": "0.6",
+        "model": "claude-haiku-5-5",
+        "effort": "default",
+    }
+
+    def call(window, action, data=None):
+        conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=10)
+        conn.request(
+            "POST",
+            "/api/action",
+            body=json.dumps({"action": action, "values": values, "data": data or {}}),
+            headers={**host, "X-Botview-Window": window},
+        )
+        return json.loads(conn.getresponse().read())
+
+    try:
+        windows = []
+        for _ in range(2):
+            conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=10)
+            conn.request("GET", f"/?key={server.key}", headers={"Host": host["Host"]})
+            page = conn.getresponse().read().decode()
+            windows.append(page.split('const WINDOW = "')[1].split('"')[0])
+        pending = [call(w, "run")["confirm"]["data"] for w in windows]
+        replies = [None, None]
+
+        def send(i):
+            replies[i] = call(windows[i], "send", pending[i])
+
+        threads = [threading.Thread(target=send, args=(i,)) for i in range(2)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        assert all(r["error"] is None for r in replies), replies  # neither was "still working"
+        apps = [server.window(w).app for w in windows]
+        assert apps[0] is not apps[1]
+        assert [a.tally.session.calls for a in apps] == [1, 1]  # each counts its own
+    finally:
+        server.stop()
+
+
+def test_traces_snapshot_only_with_the_flag(corpus, DEFAULTS):
+    from botview import render
+    from botview.page import Page
+
+    plain = DupeBotApp(client=Client())
+    traced = DupeBotApp(client=Client(), show_traces=True)
+    plain.handle("run", DEFAULTS, {})  # a traced request, from another window
+    titles = [s.title for s in traced.footer()]
+    assert titles[0] == "Token usage and estimated cost" and "Traces" in titles
+    assert "Recent requests" in titles
+    assert [s.title for s in plain.footer()] == ["Token usage and estimated cost"]
+    html = render(Page("T", sections=traced.footer()))
+    assert "DupeBot: scan" in html and "all windows and bots" in html

@@ -8,12 +8,14 @@ dependencies = [
     "anthropic>=2.7,<3",
     "botview",
     "bottrace",
+    "filefacts",
     "finops",
 ]
 
 [tool.uv.sources]
 botview = { workspace = true }
 bottrace = { workspace = true }
+filefacts = { workspace = true }
 finops = { workspace = true }
 
 [project.scripts]

@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from botview.charts import CHART_CSS, CHART_JS, Chart, chart_html
+from botview.timeline import TIMELINE_CSS, TIMELINE_JS, Timeline, timeline_html
 from botview.waterfall import WATERFALL_CSS, Waterfall, waterfall_html
 
 # Badge and row tones. Each has a colour in light and dark themes.
@@ -61,7 +62,7 @@ class Card:
     blocks: Sequence["Block"] = ()
 
 
-Block = Text | Table | Card | Chart | Waterfall
+Block = Text | Table | Card | Chart | Waterfall | Timeline
 
 
 @dataclass(frozen=True)
@@ -98,7 +99,7 @@ def document(title: str, body: str, script: str = "", body_class: str = "") -> s
             f'<style>{CSS}</style></head><body class="{_e(body_class)}"><main>',
             body,
             "</main>",
-            f"<script>{FILTER_JS}{CHART_JS}{script}</script>",
+            f"<script>{FILTER_JS}{CHART_JS}{TIMELINE_JS}{script}</script>",
             "</body></html>",
         ]
     )
@@ -154,6 +155,8 @@ def _block(block: Block) -> str:
         return _table(block)
     if isinstance(block, Waterfall):
         return waterfall_html(block)
+    if isinstance(block, Timeline):
+        return timeline_html(block)
     if isinstance(block, Chart):
         return chart_html(block)
     if isinstance(block, Card):
@@ -299,16 +302,19 @@ tr.row-neutral td { color: var(--muted); }
 :root {
   --chart-surface: #fcfcfb; --chart-grid: #e1e0d9; --chart-axis: #c3c2b7; --chart-muted: #898781;
   --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a;
+  --series-4: #eda100; --series-5: #e87ba4; --series-6: #008300;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --chart-surface: #1a1a19; --chart-grid: #2c2c2a; --chart-axis: #383835;
     --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+    --series-4: #c98500; --series-5: #d55181; --series-6: #008300;
   }
 }
 :root[data-theme="dark"] {
   --chart-surface: #1a1a19; --chart-grid: #2c2c2a; --chart-axis: #383835;
   --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+  --series-4: #c98500; --series-5: #d55181; --series-6: #008300;
 }
 .hero { margin: 8px 0 16px; }
 .hero-label { color: var(--muted); font-size: 13px; }
@@ -316,6 +322,7 @@ tr.row-neutral td { color: var(--muted); }
 """
     + CHART_CSS
     + WATERFALL_CSS
+    + TIMELINE_CSS
 )
 
 FILTER_JS = """

@@ -94,32 +94,42 @@ def timing_blocks(spans: list[dict], now_ms: float | None = None) -> list[Block]
 
 def traces_page(traces: list[list[dict]], detail: int = 5) -> Page:
     """Recent traces, newest first: a table of all, and timelines for the newest few."""
+    return Page(
+        title="BoringBots traces",
+        subtitle="What each request did, how long each step took, and what it cost.",
+        facts=traces_facts(traces),
+        sections=traces_sections(traces, detail),
+    )
+
+
+def traces_facts(traces: list[list[dict]]) -> list[tuple[str, str]]:
+    """Headline figures for a set of traces."""
     summaries = [summarize(t) for t in traces]
     totals = [s.total_ms for s in summaries]
-    facts = [
+    return [
         ("Requests shown", f"{len(summaries)}"),
         ("Median time to answer", _seconds(median(totals)) if totals else "-"),
         ("Slowest", _seconds(max(totals)) if totals else "-"),
         ("Model calls", f"{sum(s.llm_calls for s in summaries):,}"),
         ("Estimated cost", _usd(sum(s.cost_usd for s in summaries))),
     ]
+
+
+def traces_sections(traces: list[list[dict]], detail: int = 5) -> list[Section]:
+    """The traces page's content: a table of all, and timelines for the newest few.
+    Also used to show a traces snapshot inside a bot's own page."""
+    summaries = [summarize(t) for t in traces]
     if not summaries:
-        sections = [Section("No traces yet", [], [Text("Run a bot, then come back.")])]
-    else:
-        sections = [_overview(summaries)]
-        for spans, s in list(zip(traces, summaries, strict=True))[:detail]:
-            badges = [Badge(_seconds(s.total_ms), "info")]
-            if s.status != "ok":
-                badges.append(Badge(s.status, "warning"))
-            sections.append(
-                Section(f"{s.bot}: {s.name}, {_when(s.started_at)}", badges, timing_blocks(spans))
-            )
-    return Page(
-        title="BoringBots traces",
-        subtitle="What each request did, how long each step took, and what it cost.",
-        facts=facts,
-        sections=sections,
-    )
+        return [Section("No traces yet", [], [Text("Run a bot, then come back.")])]
+    sections = [_overview(summaries)]
+    for spans, s in list(zip(traces, summaries, strict=True))[:detail]:
+        badges = [Badge(_seconds(s.total_ms), "info")]
+        if s.status != "ok":
+            badges.append(Badge(s.status, "warning"))
+        sections.append(
+            Section(f"{s.bot}: {s.name}, {_when(s.started_at)}", badges, timing_blocks(spans))
+        )
+    return sections
 
 
 def _overview(summaries: list[TraceSummary]) -> Section:

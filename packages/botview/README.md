@@ -29,7 +29,7 @@ path = write_page(page, Path.home() / ".mybot" / "pages")
 open_in_browser(path)
 ```
 
-- **Blocks:** `Text` (plain, or a coloured callout with a tone and an optional bold label), `Table` (optional tone per row and right-aligned number columns) and `Card` (a titled group with badges, holding other blocks). A `Page` has a title, subtitle, label/value facts, page-wide notices and `Section`s.
+- **Blocks:** `Text` (plain, or a coloured callout with a tone and an optional bold label), `Table` (optional tone per row and right-aligned number columns), `Card` (a titled group with badges, holding other blocks) and `Timeline` (date `Span`s drawn under one bar covering them all, on an axis padded 5% each side; each row also shows its dates as text. Optionally each span also gets a 100% breakdown bar over up to six coloured `categories` plus a grey "Other", with an overall breakdown bar and key last, and `page_size` pages through the spans while the axis and key stay fixed). A `Page` has a title, subtitle, label/value facts, page-wide notices and `Section`s.
 - **Tones:** `neutral`, `good`, `info`, `caution`, `warning`. Each has light and dark theme colours.
 - **Self-contained:** styling and the small filter script are inline, and nothing is fetched from the web. Pages work offline, and file names shown on them never leave the machine.
 - **Never overwrites:** `write_page` writes a new timestamped file, adding a number if the name is taken.
@@ -42,6 +42,7 @@ A bot can also run as a live app: a local page with settings controls that runs 
 - **Replies:** `handle` returns a `Reply` with a `Page` to show, a `Confirm` (a question with a button that runs a further action, for anything that costs money), an `error` and/or a `status` line. `footer()` is redrawn after every action, which suits running tallies.
 - **Stages:** an app with a `stages()` method returning `Stage(title, detail, state)` items (state `todo`, `active` or `done`) gets a numbered row of them under its title, redrawn after every action and live update. Done stages are a saturated green, stages to come a pale green, and the active one is outlined.
 - **Live updates:** an app with a `use_updates(update)` method is given a function to call during a long `handle()`: `update(status=..., page=...)`. The page polls once a second, shows the status line (with a seconds ticker) and redraws the results area whenever a new page arrives, for example to fill in results as they stream in.
-- **One action at a time:** a second click while the bot is working gets a "still working" message.
+- **Windows:** pass `LiveServer` a class or function that makes the App (`LiveServer(MyApp)`) instead of an App, and every browser window gets its own App, with its own progress and its own one-action-at-a-time lock, so windows run side by side. The page shows a **+ New window** link and numbers each window. Passing an App instance keeps one shared App, as before.
+- **One action at a time per window:** a second click while the bot is working gets a "still working" message.
 - **Local only:** the server listens on 127.0.0.1 and requires a random per-session key (in the address for the page, in a header for actions), and refuses other host names. Other websites in the browser cannot drive it.
 - **Session:** the app lives until Ctrl+C. State kept on the app object, such as a tally, resets on the next start.

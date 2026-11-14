@@ -215,6 +215,9 @@ button:disabled { opacity: .5; cursor: progress; }
 .error { background: var(--warning-bg); color: var(--warning-fg); border-radius: 8px;
   padding: 8px 12px; margin: 0 0 16px; }
 .app-footer { margin-top: 32px; }
+.new-window { margin: -4px 0 12px; font-size: 13px; color: var(--muted); }
+.new-window a { color: var(--info-fg); font-weight: 600; text-decoration: none; }
+.new-window a:hover { text-decoration: underline; }
 """
 
 CONTROLS_JS = """

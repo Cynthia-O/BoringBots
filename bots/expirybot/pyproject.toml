@@ -4,7 +4,16 @@ version = "0.1.0"
 description = "Helps you agree on a retention policy, then flags documents past their retention period."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "botview",
+    "bottrace",
+    "filefacts",
+]
+
+[tool.uv.sources]
+botview = { workspace = true }
+bottrace = { workspace = true }
+filefacts = { workspace = true }
 
 [project.scripts]
 expirybot = "expirybot.cli:main"
